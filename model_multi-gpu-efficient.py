@@ -65,7 +65,7 @@ class PTBModel(object):
                     random_tensor += random_ops.random_uniform([config.batch_size, config.time_steps, config.embedding_size])
                     self._gen_emb_mask = math_ops.floor(random_tensor)
 
-                embedding_out = math_ops.div(embedding, config.drop_input*config.keep_prob_embed) * self._emb_mask
+                embedding_out = math_ops.div(embedding, config.drop_i*config.keep_prob_embed) * self._emb_mask
                 # embedding_out = tf.nn.dropout(embedding,
                 #                               config.keep_prob_embed)
             else:
@@ -310,7 +310,6 @@ class PTBModel(object):
     def gen_emb_mask(self, session):
         return {self._emb_mask: session.run(self._gen_emb_mask)}
 
-
     def update_drop_params(self, session, output_keep_prob, state_keep_prob):
         for i in range(config.lstm_layers_num):
             if i < config.lstm_layers_num -1:
@@ -380,8 +379,10 @@ class MASGDOptimizer(object):
 
         self._model = model
 
-        self._train_op = optimizer.apply_gradients(zip(grads, tvars), global_step=model.global_step)
+        update_op = optimizer.apply_gradients(zip(grads, tvars), global_step=model.global_step)
 
+        self._train_op = list()
+        self._train_op.append(update_op)
         self._save_vars = []
         self._load_vars = []
         self._final_vars = []
@@ -402,12 +403,11 @@ class MASGDOptimizer(object):
                 self._load_vars.append(tf.assign(var, tmp_var))
 
         self._update_op = list()
-        for i, var in enumerate(tvars):
-            self._update_op.append(tf.assign(self._final_vars[i], decay * self._final_vars[i] + var))
-
+        with tf.control_dependencies([update_op]):
+            for i, var in enumerate(tvars):
+                self._train_op.append(tf.assign(self._final_vars[i], decay * self._final_vars[i] + var))
 
         type(self).count += 1
-
 
     @property
     def train_op(self):
@@ -541,7 +541,7 @@ class RMSpropOptimizer(object):
         self._grads = grads
         self._tvars = tvars
 
-        for tvar, g in zip(tvars,grads):
+        for tvar, g in zip(tvars, grads):
             self._ms.append(tf.get_variable(g.op.name + "_ms",
                                                      initializer=tf.ones_like(tvar, dtype=tf.float32)/1000,
                                                      trainable=False))
@@ -599,7 +599,6 @@ class RMSpropOptimizer(object):
         else:
             logger.exception("opt_mom can take values in [0,1)")
             raise ValueError("opt_mom can take values in [0,1)")
-
 
         self._train_op.extend(self._ms_accu_op)
 
@@ -705,93 +704,89 @@ def tvars_num():
     return nvars
 
 
+# def run_epoch(session, model, eval_op=None, verbose=True):
+#     """run the given model over its data"""
+#
+#     start_time = time.time()
+#
+#     if eval_op is not None:
+#         model.input.shuffle()
+#
+#     losses = 0.0
+#     iters = 0
+#
+#     # zeros initial state for all devices
+#     state = session.run(model.initial_state)
+#     feed_dict_masks = {}
+#     # if variational every epoch --> update masks
+#     if config.variational == 'epoch' and eval_op is not None:
+#         feed_dict_masks = model.gen_masks(session)
+#
+#     # evaluate loss and final state for all devices
+#     fetches = {"loss": model.loss,
+#                "final_state": model.final_state}
+#
+#     # perform train op if training
+#     if eval_op is not None:
+#         fetches["eval_op"] = eval_op
+#
+#     for step in range(model.input.epoch_size):
+#         # if variational every batch --> update masks
+#         if config.variational == 'batch' and eval_op is not None:
+#             feed_dict_masks = model.gen_masks(session)
+#
+#         # pass states between time batches
+#         feed_dict = dict(feed_dict_masks.items())
+#         for j, (c, h) in enumerate(model.initial_state):
+#             feed_dict[c] = state[j].c
+#             feed_dict[h] = state[j].h
+#
+#         feed_dict.update(model.input.get_batch(step*model.input.time_steps))
+#
+#         vals = session.run(fetches, feed_dict)
+#
+#         loss = vals["loss"]
+#         state = vals["final_state"]
+#
+#         losses += loss
+#         iters += model.input.time_steps
+#
+#         if verbose and step % (model.input.epoch_size // 10) == 10:
+#             logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
+#                   (step * 1.0 / model.input.epoch_size, np.exp(losses / iters), np.log2(np.exp(losses / iters)),
+#                    iters * model.input.batch_size / (time.time() - start_time)))
+#
+#     return np.exp(losses / iters)
+
+
 def run_epoch(session, model, eval_op=None, verbose=True):
     """run the given model over its data"""
-
-    start_time = time.time()
-
-    if eval_op is not None:
-        model.input.shuffle()
-
-    losses = 0.0
-    iters = 0
-
-    # zeros initial state for all devices
-    state = session.run(model.initial_state)
-    feed_dict_masks = {}
-    # if variational every epoch --> update masks
-    if config.variational == 'epoch' and eval_op is not None:
-        feed_dict_masks = model.gen_masks(session)
-
-    # evaluate loss and final state for all devices
-    fetches = {"loss": model.loss,
-               "final_state": model.final_state}
-
-    # perform train op if training
-    if eval_op is not None:
-        fetches["eval_op"] = eval_op
-
-    for step in range(model.input.epoch_size):
-        # if variational every batch --> update masks
-        if config.variational == 'batch' and eval_op is not None:
-            feed_dict_masks = model.gen_masks(session)
-
-        # pass states between time batches
-        feed_dict = dict(feed_dict_masks.items())
-        for j, (c, h) in enumerate(model.initial_state):
-            feed_dict[c] = state[j].c
-            feed_dict[h] = state[j].h
-
-        feed_dict.update(model.input.get_batch(step*model.input.time_steps))
-
-        vals = session.run(fetches, feed_dict)
-
-        loss = vals["loss"]
-        state = vals["final_state"]
-
-        losses += loss
-        iters += model.input.time_steps
-
-        if verbose and step % (model.input.epoch_size // 10) == 10:
-            logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
-                  (step * 1.0 / model.input.epoch_size, np.exp(losses / iters), np.log2(np.exp(losses / iters)),
-                   iters * model.input.batch_size / (time.time() - start_time)))
-
-    return np.exp(losses / iters)
-
-
-def arms_run_epoch(session, model, eval_op=None, verbose=True):
-    """run the given model over its data"""
     if eval_op is not None:
         model.input.shuffle()
 
     start_time = time.time()
     losses = 0.0
     iters = 0
-    # g_norms = [0, np.iinfo(np.int32).max, 0]
-    # ms_norms = [0, np.iinfo(np.int32).max, 0]
-    # u_norms = [0, np.iinfo(np.int32).max, 0]
-    # updates_count = 0
 
     # zeros initial state for all devices
     state = session.run(model.initial_state)
+
     feed_dict_masks = {}
     # if variational every epoch --> update masks
     if config.variational == 'epoch' and eval_op is not None:
+        # generate masks for epoch
         feed_dict_masks = model.gen_masks(session)
 
-        if config.drop_input < 1.0:
-            dropped_words = list()
+        # randomize words to drop from the vocabulary
+        if config.drop_i < 1.0:
+            words2drop = list()
             for i in range(config.batch_size):
                 rand = np.random.rand(config.vocab_size)
                 bin_vec = np.zeros(config.vocab_size, dtype=np.int32)
-                bin_vec[rand > config.drop_input] = 1
+                bin_vec[rand > config.drop_i] = 1
                 drop = np.where(bin_vec == 1)
-                dropped_words.append(drop[0])
-            # dropped_words = drop[0]
-            d = list()
-
-
+                words2drop.append(drop[0])
+            dropped = list()
 
     # evaluate loss and final state for all devices
     fetches = {
@@ -802,8 +797,6 @@ def arms_run_epoch(session, model, eval_op=None, verbose=True):
     # perform train op if training
     if eval_op is not None:
         fetches["eval_op"] = eval_op
-        fetches["update_op"] = model.optimizer.update_op
-        # fetches["norms"] = model.rms.get_grads_norm()
 
     for step in range(model.input.epoch_size):
         # if variational every batch --> update masks
@@ -818,14 +811,13 @@ def arms_run_epoch(session, model, eval_op=None, verbose=True):
 
         feed_dict.update(model.input.get_batch(step*model.input.time_steps))
 
-
         if eval_op is not None:
             feed_dict.update(model.gen_emb_mask(session))
-            if config.drop_input < 1.0:
+            if config.drop_i < 1.0:
                 for i, batch in enumerate(feed_dict[model.input.input_data]):
                     for j, w in enumerate(batch):
-                        if w in dropped_words[i]:
-                            d.append(w)
+                        if w in words2drop[i]:
+                            dropped.append(w)
                             feed_dict[model.emb_mask][i, j, :] = 0
 
         vals = session.run(fetches, feed_dict)
@@ -836,84 +828,84 @@ def arms_run_epoch(session, model, eval_op=None, verbose=True):
         losses += loss
         iters += model.input.time_steps
 
-
         if verbose and step % (model.input.epoch_size // 10) == 10:
             logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
                   (step * 1.0 / model.input.epoch_size, np.exp(losses / iters), np.log2(np.exp(losses / iters)),
                    iters * model.input.batch_size / (time.time() - start_time)))
 
-    if eval_op is not None and config.drop_input < 1.0:
-        logger.info("dropped %d/%d words" % (len(d),model.input.data_len) )
+    if eval_op is not None and config.drop_i < 1.0:
+        logger.info("dropped %d/%d words" % (len(dropped), model.input.data_len))
 
     return np.exp(losses / iters)
 
 
-def asgd_run_epoch(session, model, eval_op=None, verbose=True):
-    """run the given model over its data"""
-
-    start_time = time.time()
-
-    if eval_op is not None:
-        model.input.shuffle()
-
-    losses = 0.0
-    iters = 0
-
-    # zeros initial state for all devices
-    state = session.run(model.initial_state)
-
-    feed_dict_masks = {}
-    # if variational every epoch --> update masks
-    if config.variational == 'epoch' and eval_op is not None:
-        feed_dict_masks = model.gen_masks(session)
-
-    # evaluate loss and final state for all devices
-    fetches = {
-        "loss": model.loss,
-        "final_state": model.final_state
-    }
-
-    # perform train op if training
-    if eval_op is not None:
-        fetches["eval_op"] = eval_op
-        fetches["update_op"] = model.optimizer.update_op
-
-    for step in range(model.input.epoch_size):
-        # if variational every batch --> update masks
-        if config.variational == 'batch' and eval_op is not None:
-            feed_dict_masks = model.gen_masks(session)
-
-        # pass states between time batches
-        feed_dict = dict(feed_dict_masks.items())
-        for j, (c, h) in enumerate(model.initial_state):
-            feed_dict[c] = state[j].c
-            feed_dict[h] = state[j].h
-
-        feed_dict.update(model.input.get_batch(step*model.input.time_steps))
-
-        vals = session.run(fetches, feed_dict)
-
-        loss = vals["loss"]
-        state = vals["final_state"]
-
-        losses += loss
-        iters += model.input.time_steps
-
-        if verbose and step % (model.input.epoch_size // 10) == 10:
-            logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
-                  (step * 1.0 / model.input.epoch_size, np.exp(losses / iters), np.log2(np.exp(losses / iters)),
-                   iters * model.input.batch_size / (time.time() - start_time)))
-
-        if step == model.input.epoch_size - 1 and eval_op is not None:
-            logger.info("trigger: " + str(vals["update_op"][0]) + "\tT: " + str(vals["update_op"][1]))
-
-    return np.exp(losses / iters)
+# def asgd_run_epoch(session, model, eval_op=None, verbose=True):
+#     """run the given model over its data"""
+#
+#     start_time = time.time()
+#
+#     if eval_op is not None:
+#         model.input.shuffle()
+#
+#     losses = 0.0
+#     iters = 0
+#
+#     # zeros initial state for all devices
+#     state = session.run(model.initial_state)
+#
+#     feed_dict_masks = {}
+#     # if variational every epoch --> update masks
+#     if config.variational == 'epoch' and eval_op is not None:
+#         feed_dict_masks = model.gen_masks(session)
+#
+#     # evaluate loss and final state for all devices
+#     fetches = {
+#         "loss": model.loss,
+#         "final_state": model.final_state
+#     }
+#
+#     # perform train op if training
+#     if eval_op is not None:
+#         fetches["eval_op"] = eval_op
+#         fetches["update_op"] = model.optimizer.update_op
+#
+#     for step in range(model.input.epoch_size):
+#         # if variational every batch --> update masks
+#         if config.variational == 'batch' and eval_op is not None:
+#             feed_dict_masks = model.gen_masks(session)
+#
+#         # pass states between time batches
+#         feed_dict = dict(feed_dict_masks.items())
+#         for j, (c, h) in enumerate(model.initial_state):
+#             feed_dict[c] = state[j].c
+#             feed_dict[h] = state[j].h
+#
+#         feed_dict.update(model.input.get_batch(step*model.input.time_steps))
+#
+#         vals = session.run(fetches, feed_dict)
+#
+#         loss = vals["loss"]
+#         state = vals["final_state"]
+#
+#         losses += loss
+#         iters += model.input.time_steps
+#
+#         if verbose and step % (model.input.epoch_size // 10) == 10:
+#             logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
+#                   (step * 1.0 / model.input.epoch_size, np.exp(losses / iters), np.log2(np.exp(losses / iters)),
+#                    iters * model.input.batch_size / (time.time() - start_time)))
+#
+#         if step == model.input.epoch_size - 1 and eval_op is not None:
+#             logger.info("trigger: " + str(vals["update_op"][0]) + "\tT: " + str(vals["update_op"][1]))
+#
+#     return np.exp(losses / iters)
 
 
 def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver):
     """ Trains the network by the given optimizer """
 
     global bestVal
+
     def stop_criteria(epoch):
         stop_window = 7
         if epoch == epochs_num - 1:
@@ -930,15 +922,15 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
 
     epochs_num = config.layer_epoch if layer != -1 else config.entire_network_epoch
 
-    if config.opt == "sgd" or config.opt == "rms":
-        run_e = run_epoch
-    elif config.opt == "asgd":
-        run_e = asgd_run_epoch
-    elif config.opt == "arms" or config.opt == "marms" or config.opt == "masgd":
-        run_e = arms_run_epoch
-    else:
-        logger.exception("no valid optimizer")
-        raise ValueError("no valid optimizer")
+    # if config.opt == "sgd" or config.opt == "rms":
+    run_e = run_epoch
+    # elif config.opt == "asgd":
+    #     run_e = asgd_run_epoch
+    # elif config.opt == "arms" or config.opt == "marms" or config.opt == "masgd":
+    #     run_e = arms_run_epoch
+    # else:
+    #     logger.exception("no valid optimizer")
+    #     raise ValueError("no valid optimizer")
 
     logger.info("updating dropout probabilities")
     m.update_drop_params(session, config.drop_output, config.drop_state)
@@ -1162,6 +1154,7 @@ def remove_tempstate_files(dir):
                 file_path = os.path.join(dir, filename)
                 yield(file_path)
 
+
 def main():
 
     ###################################### GL configs and restore ######################################
@@ -1243,6 +1236,9 @@ def main():
     elapsed = time.time() - start_time_total
     logger.info("optimization took %02d:%02d:%02d\n" % (elapsed // 3600, (elapsed // 60) % 60, elapsed % 60))
 
+
+
+
     ###################################### GL evaluation ######################################
     if args.no_eval is None:
         batch_size = config.batch_size
@@ -1308,6 +1304,7 @@ def main():
     for file_path in remove_tempstate_files(directory + '/saver'):
         os.remove(file_path)
 
+
 if __name__ == "__main__":
     ###################################### argument parsing ######################################
     ap = argparse.ArgumentParser()
@@ -1342,7 +1339,7 @@ if __name__ == "__main__":
     ap.add_argument("--drop_state",         type=str, default=None, help="list of dropout parameters for recurrent connections")
     ap.add_argument("--keep_prob_embed",    type=float, default=None, help="keep prob for embedding")
     ap.add_argument("--opt_c_lipsc",        type=float, default=None, help="for lwgc")
-    ap.add_argument("--drop_input",         type=float, default=None, help="drop words")
+    ap.add_argument("--drop_i",             type=float, default=None, help="drop words")
     ap.add_argument("--no_eval",            dest='no_eval', action='store_true')
     ap.add_argument("--GL",                 dest='GL', action='store_false')
     ap.add_argument('--verbose',            dest='verbose', action='store_true')
