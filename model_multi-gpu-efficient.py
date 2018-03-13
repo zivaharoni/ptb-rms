@@ -184,7 +184,7 @@ class PTBModel(object):
 
         # unroll the cell to "time_steps" times
         with tf.variable_scope("lstm%d" % 1):
-            lstm_size = units_num
+            lstm_size = units_num[0]
             cell.append(possible_cell(lstm_size))
             initial_state.append(cell[0].zero_state(batch_size, dtype=tf.float32))
             state[0] = initial_state[0]
@@ -198,7 +198,7 @@ class PTBModel(object):
         # rest of layers
         for i in range(1, config.lstm_layers_num):
             with tf.variable_scope("lstm%d" % (i + 1)):
-                lstm_size = config.embedding_size if i == (config.lstm_layers_num - 1) else units_num
+                lstm_size = units_num[i]
                 cell.append(possible_cell(lstm_size))
                 initial_state.append(cell[i].zero_state(batch_size, dtype=tf.float32))
                 state[i] = initial_state[i]
@@ -211,8 +211,16 @@ class PTBModel(object):
 
         # outer embedding bias
         b_embed_out = tf.get_variable(name="b_embed_out", shape=[vocab_size], dtype=tf.float32)
-        # outer softmax matrix is tied with embedding matrix
-        w_out = tf.transpose(embedding_map)
+
+        if config.embedding_size == config.units_num[-1]:
+            # outer softmax matrix is tied with embedding matrix
+            if is_training:
+                logger.info("tied embedding")
+            w_out = tf.transpose(embedding_map)
+        else:
+            if is_training:
+                logger.info("untied embedding")
+            w_out = tf.get_variable(name="w_embed_out", shape=[config.units_num[-1],vocab_size], dtype=tf.float32)
 
         with tf.name_scope("loss"):
             with tf.name_scope("data_loss"):
@@ -1005,6 +1013,7 @@ def main():
 
     ###################################### GL configs and restore ######################################
     GL = config.GL
+    units_num = config.units_num[:]
     start_layer = 0 if config.GL else config.lstm_layers_num - 1
 
     if args.start_layer is not None:
@@ -1018,6 +1027,7 @@ def main():
     ###################################### GL training ######################################
     for layer in range(start_layer, config.lstm_layers_num):
         config.lstm_layers_num = layer + 1
+        config.units_num = units_num[:layer+1]
 
         ###################################### build graph ######################################
         with tf.Graph().as_default() as graph:
@@ -1026,6 +1036,8 @@ def main():
             tf.set_random_seed(seed)
 
             with tf.name_scope("Train"):
+                logger.info("building model with dimensions %d->%d->%s->%d" %
+                            (config.vocab_size, config.embedding_size, str(config.units_num).replace(" ", ""), config.vocab_size))
                 with tf.variable_scope("Model", reuse=None, initializer=initializer):
                     train_input = PTBInput(config=config, data=train_data)
                     m = PTBModel(is_training=True, config=config, inputs=train_input)
@@ -1061,6 +1073,7 @@ def main():
         ###################################### train ######################################
         with tf.Session(graph=graph, config=sess_config) as session:
             session.run(tf.global_variables_initializer())
+            config.units_num = units_num[:layer + 1]
 
             if vars2load is not None and GL:
                 restore_saver.restore(session, directory + '/saver/best_model' + str(layer - 1))
@@ -1092,6 +1105,7 @@ def main():
         train_perplexity, valid_perplexity, test_perplexity = [], [], []
         for layer in range(start_layer, config.lstm_layers_num):
             config.lstm_layers_num = layer + 1
+            config.units_num = units_num[:layer + 1]
             logger.info("Evaluating layer {0}".format(layer+1))
 
             ###################################### build graph ######################################

@@ -3,8 +3,8 @@ class SmallConfig(object):
     init_scale = 0.04
     batch_size = 100
     time_steps = 35
-    units_num = 650
-    embedding_size = 650
+    units_num = [650, 650, 280]
+    embedding_size = 280
     vocab_size = 10000
     lstm_layers_num = 3
     seed = 570164
@@ -28,7 +28,7 @@ class SmallConfig(object):
     keep_prob_embed = 0.35
     drop_output = [0.65,0.3]
     drop_state = [0.65,0.65]
-    drop_input = 0.9
+    drop_i = 0.9
     drop_embed_var = False
 
 
@@ -62,7 +62,7 @@ class BigConfig(object):
     keep_prob_embed = 0.35
     drop_output = [0.65,0.3]
     drop_state = [0.65,0.65]
-    drop_input = 0.9
+    drop_i = 0.9
     drop_embed_var = False
 
 
