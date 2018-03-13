@@ -792,7 +792,7 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
 
 
     if config.opt == "asgd" or config.opt == "arms":
-        validation_tolerance = 1
+        validation_tolerance = 5
 
     if config.opt == "masgd" or config.opt == "marms":
         lr_decay = 1.0
