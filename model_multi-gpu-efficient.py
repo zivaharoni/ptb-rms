@@ -1278,3 +1278,5 @@ if __name__ == "__main__":
 
 
 # TODO: add norms method for every optimizer
+
+#TODO: add mos
