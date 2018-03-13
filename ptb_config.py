@@ -13,13 +13,9 @@ class SmallConfig(object):
     opt_eps = 1e-5
     opt_inverse_type = "add"
     opt_clip_by_var = None
-    opt_mom = 0.0
-    opt_mom_decay = 1.0
-    opt_c_lipsc = 1.0
 
     lr = 1.0
-    lr_decay = 0.9
-    max_grad_norm = 0.0
+    lr_decay = 1.0
     max_update_norm = 1.0
     layer_epoch = 500
     entire_network_epoch = layer_epoch
@@ -35,28 +31,25 @@ class SmallConfig(object):
     drop_input = 0.9
     drop_embed_var = False
 
+
 class BigConfig(object):
     forget_bias_init = 0.0
     init_scale = 0.04
     batch_size = 100
     time_steps = 35
-    units_num = 1000
-    embedding_size = 1000
+    units_num = 650
+    embedding_size = 650
     vocab_size = 10000
-    lstm_layers_num = 4
+    lstm_layers_num = 3
     seed = 570164
 
     opt = "marms"
     opt_eps = 1e-5
     opt_inverse_type = "add"
     opt_clip_by_var = None
-    opt_mom = 0.0
-    opt_mom_decay = 1.0
-    opt_c_lipsc = 1.0
 
     lr = 1.0
-    lr_decay = 0.9
-    max_grad_norm = 0.0
+    lr_decay = 1.0
     max_update_norm = 1.0
     layer_epoch = 500
     entire_network_epoch = layer_epoch
@@ -66,79 +59,11 @@ class BigConfig(object):
     AR = 1.0
     TAR = 2.0
     variational = 'epoch'
-    keep_prob_embed = 0.3
-    drop_output = [0.55, 0.25]
-    drop_state = [0.55, 0.55]
-
-
-class BiggerConfig(object):
-    forget_bias_init = 0.0
-    init_scale = 0.04
-    batch_size = 100
-    time_steps = 35
-    units_num = 1200
-    embedding_size = 1200
-    vocab_size = 10000
-    lstm_layers_num = 2
-    seed = 570164
-
-    opt = "marms"
-    opt_eps = 1e-5
-    opt_inverse_type = "add"
-    opt_clip_by_var = None
-    opt_mom = 0.0
-    opt_mom_decay = 1.0
-
-    lr = 1.0
-    lr_decay = 0.9
-    max_grad_norm = 0.0
-    max_update_norm = 2.5
-    layer_epoch = 500
-    entire_network_epoch = layer_epoch
-
-    GL = True
-    DC = False
-    AR = 1.0
-    TAR = 2.0
-    variational = 'epoch'
     keep_prob_embed = 0.35
-    drop_output = [0.65,0.25]
-    drop_state = [0.65,0.25]
-
-
-class TestConfig(object):
-    forget_bias_init = 0.0
-    init_scale = 0.04
-    batch_size = 100
-    time_steps = 35
-    units_num = 650
-    embedding_size = 650
-    vocab_size = 10000
-    lstm_layers_num = 1
-    seed = 570164
-
-    opt = "arms"
-    opt_eps = 1e-5
-    opt_inverse_type = "add"
-    opt_clip_by_var = None
-    opt_mom = 0.0
-    opt_mom_decay = 1.0
-
-    lr = 1.0
-    lr_decay = 0.9
-    max_grad_norm = 0.0
-    max_update_norm = 7.0
-    layer_epoch = 50
-    entire_network_epoch = layer_epoch
-
-    GL = True
-    DC = False
-    AR = 1.0
-    TAR = 2.0
-    variational = 'epoch'
-    keep_prob_embed = 0.5
-    drop_output = [0.65, 0.35]
-    drop_state = [0.65, 0.35]
+    drop_output = [0.65,0.3]
+    drop_state = [0.65,0.65]
+    drop_input = 0.9
+    drop_embed_var = False
 
 
 

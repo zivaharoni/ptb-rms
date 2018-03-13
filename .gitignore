@@ -2,3 +2,4 @@ results/*
 runfile.py
 .idea/*
 __pycache__/*
+summary.csv

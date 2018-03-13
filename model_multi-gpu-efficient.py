@@ -18,6 +18,7 @@ import argparse
 import logging
 import shutil
 
+
 class PTBModel(object):
     """class for handling the ptb model"""
 
@@ -50,8 +51,9 @@ class PTBModel(object):
             b_embed_in = tf.get_variable(name="b_embed_in", shape=[config.embedding_size], dtype=tf.float32)
             embedding = tf.nn.embedding_lookup(embedding_map, self._input.input_data) + b_embed_in
 
-            # non variational wrapper for the embedding
             if is_training and config.keep_prob_embed < 1:
+                # non variational wrapper for the embedding
+
                 self._emb_mask = tf.placeholder(dtype=tf.float32, shape=[config.batch_size, config.time_steps, config.embedding_size],
                                                    name="embedding_mask")
                 if config.drop_embed_var:
@@ -61,13 +63,13 @@ class PTBModel(object):
                         random_tensor = tf.tile(random_tensor, [1, config.time_steps, 1])
                         self._gen_emb_mask = math_ops.floor(random_tensor)
                 else:
-                    random_tensor = ops.convert_to_tensor(config.keep_prob_embed)
-                    random_tensor += random_ops.random_uniform([config.batch_size, config.time_steps, config.embedding_size])
-                    self._gen_emb_mask = math_ops.floor(random_tensor)
+                    with tf.name_scope("out_mask_gen"):
+                        random_tensor = ops.convert_to_tensor(config.keep_prob_embed)
+                        random_tensor += random_ops.random_uniform([config.batch_size, config.time_steps, config.embedding_size])
+                        self._gen_emb_mask = math_ops.floor(random_tensor)
 
                 embedding_out = math_ops.div(embedding, config.drop_i*config.keep_prob_embed) * self._emb_mask
-                # embedding_out = tf.nn.dropout(embedding,
-                #                               config.keep_prob_embed)
+
             else:
                 embedding_out = embedding
 
@@ -82,7 +84,6 @@ class PTBModel(object):
             self._final_state = final_state
             self._loss = loss
             self._grads = grads
-
 
         if is_training:
             # set learning rate as variable in order to anneal it throughout training
@@ -104,23 +105,27 @@ class PTBModel(object):
                 if config.opt == "sgd":
                     self._optimizer = SGDOptimizer(self, grads, tvars)
                     self._train_op = self._optimizer.train_op
+                elif config.opt == "asgd":
+                    opt = SGDOptimizer(self, grads, tvars)
+                    self._optimizer = ASGDOptimizer(self, opt.updates, tvars)
+                    self._train_op = self._optimizer.train_op
                 elif config.opt == "masgd":
-                    clipped_updates, _ = tf.clip_by_global_norm(grads, config.max_update_norm)
-                    self._optimizer = MASGDOptimizer(self, clipped_updates, tvars)
+                    opt = SGDOptimizer(self, grads, tvars)
+                    self._optimizer = MASGDOptimizer(self, opt.updates, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "rms":
                     self._optimizer = RMSpropOptimizer(self, grads, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "arms":
-                    self._rms = RMSpropOptimizer(self, grads, tvars)
-                    self._optimizer = ASGDOptimizer(self, self._rms.updates, tvars)
-                    self._train_op = [self._optimizer.train_op] + self._rms.train_op
+                    opt = RMSpropOptimizer(self, grads, tvars)
+                    self._optimizer = ASGDOptimizer(self, opt.updates, tvars)
+                    self._train_op = self._optimizer.train_op
                 elif config.opt == "marms":
-                    self._rms = RMSpropOptimizer(self, grads, tvars)
-                    self._optimizer = MASGDOptimizer(self, self._rms.updates, tvars)
-                    self._train_op = [self._optimizer.train_op] + self._rms.train_op
+                    opt = RMSpropOptimizer(self, grads, tvars)
+                    self._optimizer = MASGDOptimizer(self, opt.updates, tvars)
+                    self._train_op = self._optimizer.train_op
                 else:
-                    raise ValueError("must choose a valid optimizer")
+                    raise ValueError( config.opt + " is not a valid optimizer")
 
     def complete_model(self, embedding_out, embedding_map, is_training):
         """ Build rest of model for a single gpu
@@ -349,7 +354,7 @@ class PTBInput(object):
         self.data = np.reshape(data[start_idx:start_idx + data_len], newshape=[batch_size, time_steps * epoch_size])
         self.label = np.reshape(data[1+start_idx:data_len + start_idx + 1], newshape=[batch_size, time_steps * epoch_size])
 
-        print("start_idx", self.start_idx)
+        logger.info("Batching from index %d" % self.start_idx)
 
 
     def get_batch(self, idx):
@@ -360,14 +365,22 @@ class PTBInput(object):
 class SGDOptimizer(object):
     def __init__(self, model, grads, tvars):
 
-        optimizer = tf.train.GradientDescentOptimizer(model.lr)
-        grads, _ = tf.clip_by_global_norm(grads, config.max_grad_norm)
+        self._updates = [model.lr * g for g in grads]
+        optimizer = tf.train.GradientDescentOptimizer(1.0)
+
+        if config.max_update_norm > 0:
+            self._updates, _ = tf.clip_by_global_norm(self._updates, config.max_update_norm)
+
         self._train_op = optimizer.apply_gradients(
-            zip(grads, tvars), global_step=model.global_step)
+            zip(self._updates, tvars), global_step=model.global_step)
 
     @property
     def train_op(self):
         return self._train_op
+
+    @property
+    def updates(self):
+        return self._updates
 
 
 class MASGDOptimizer(object):
@@ -375,35 +388,33 @@ class MASGDOptimizer(object):
     count = 0
 
     def __init__(self, model, grads, tvars, decay=0.9999):
-        optimizer = tf.train.GradientDescentOptimizer(model.lr)
+        optimizer = tf.train.GradientDescentOptimizer(1.0)
 
         self._model = model
-
-        update_op = optimizer.apply_gradients(zip(grads, tvars), global_step=model.global_step)
+        self._updates = grads
 
         self._train_op = list()
-        self._train_op.append(update_op)
+        self._train_op.append(optimizer.apply_gradients(zip(grads, tvars), global_step=model.global_step))
+
         self._save_vars = []
         self._load_vars = []
         self._final_vars = []
         self._final_assign_op = []
         for var in tvars:
             self._final_vars.append(tf.get_variable(var.op.name + "final%d" % type(self).count,
-                                                    initializer=tf.zeros_like(var, dtype=tf.float32), trainable=False)
-                                    )
+                                                    initializer=tf.zeros_like(var, dtype=tf.float32), trainable=False))
             with tf.name_scope("final_average"):
+                cur_epoch_num = (tf.cast((model.epoch + 1) * model.input.epoch_size, dtype=tf.float32))
                 self._final_assign_op.append(tf.assign(var, self._final_vars[-1] *
-                                                       (1 - decay) / (1 - decay ** (tf.cast((model.epoch + 1) * model.input.epoch_size, dtype=tf.float32)))))
+                                                       (1 - decay) / (1 - decay ** cur_epoch_num)))
 
             with tf.name_scope("assign_current_weights"):
                 tmp_var = (tf.get_variable(var.op.name + "tmp%d" % type(self).count,
-                                           initializer=tf.zeros_like(var, dtype=tf.float32), trainable=False)
-                           )
+                                           initializer=tf.zeros_like(var, dtype=tf.float32), trainable=False))
                 self._save_vars.append(tf.assign(tmp_var, var))
                 self._load_vars.append(tf.assign(var, tmp_var))
 
-        self._update_op = list()
-        with tf.control_dependencies([update_op]):
+        with tf.control_dependencies(self._train_op):
             for i, var in enumerate(tvars):
                 self._train_op.append(tf.assign(self._final_vars[i], decay * self._final_vars[i] + var))
 
@@ -412,14 +423,6 @@ class MASGDOptimizer(object):
     @property
     def train_op(self):
         return self._train_op
-
-    @property
-    def trigger(self):
-        return self._trigger
-
-    @property
-    def update_op(self):
-        return self._update_op
 
     @property
     def final_assign_op(self):
@@ -439,18 +442,23 @@ class ASGDOptimizer(object):
     count = 0
 
     def __init__(self, model, grads, tvars):
-        optimizer = tf.train.GradientDescentOptimizer(model.lr)
+
+        optimizer = tf.train.GradientDescentOptimizer(1.0)
 
         self._model = model
+        self._updates = grads
 
-        self._train_op = optimizer.apply_gradients(zip(grads, tvars), global_step=model.global_step)
+        with tf.name_scope("trigger"):
+            self._trigger = tf.get_variable("ASGD_trigger%d" % type(self).count, initializer=tf.constant(False, dtype=tf.bool), trainable=False)
+            self._set_trigger = tf.assign(self._trigger, True)
 
-        self._trigger = tf.get_variable("ASGD_trigger%d" % type(self).count, initializer=tf.constant(False, dtype=tf.bool), trainable=False)
-        self._set_trigger = tf.assign(self._trigger, True)
+            self._T = tf.get_variable("T%d" % type(self).count, initializer=tf.constant(0, dtype=tf.int32), trainable=False)
+            self._new_T = tf.placeholder(tf.int32, shape=[], name="new_T%d" % type(self).count)
+            self._set_T = tf.assign(self._T, self._new_T)
 
-        self._T = tf.get_variable("T%d" % type(self).count, initializer=tf.constant(0, dtype=tf.int32), trainable=False)
-        self._new_T = tf.placeholder(tf.int32, shape=[], name="new_T%d" % type(self).count)
-        self._set_T = tf.assign(self._T, self._new_T)
+        self._train_op = list()
+        update_op = optimizer.apply_gradients(zip(grads, tvars), global_step=model.global_step)
+        self._train_op.append(update_op)
 
         self._save_vars = []
         self._load_vars = []
@@ -461,12 +469,12 @@ class ASGDOptimizer(object):
                                                     initializer=tf.zeros_like(var, dtype=tf.float32), trainable=False)
                                     )
             with tf.name_scope("final_average"):
-                self._final_assign_op.append(tf.assign(var, self._final_vars[-1] *
-                                                       tf.cast((model.epoch + 1 - self._T + 1) * model.input.epoch_size, dtype=tf.float32))) # TODO epoch size
+                cur_epoch_num = tf.cast((model.epoch - self._T + 1) * model.input.epoch_size, dtype=tf.float32)
+                self._final_assign_op.append(tf.assign(var, self._final_vars[-1] / cur_epoch_num))
+
             with tf.name_scope("assign_current_weights"):
                 tmp_var = (tf.get_variable(var.op.name + "tmp%d" % type(self).count,
-                                           initializer=tf.zeros_like(var, dtype=tf.float32), trainable=False)
-                           )
+                                           initializer=tf.zeros_like(var, dtype=tf.float32), trainable=False))
                 self._save_vars.append(tf.assign(tmp_var, var))
                 self._load_vars.append(tf.assign(var, tmp_var))
 
@@ -490,8 +498,10 @@ class ASGDOptimizer(object):
 
             return op
 
-        with tf.name_scope("trigger_mux"):
-            self._update_op = tf.cond(self._trigger, lambda: trigger_on(), lambda: trigger_off())
+        with tf. control_dependencies([update_op]):
+            with tf.name_scope("trigger_mux"):
+                self._train_op.append(tf.cond(self._trigger, lambda: trigger_on(), lambda: trigger_off()))
+
 
         type(self).count += 1
 
@@ -505,10 +515,6 @@ class ASGDOptimizer(object):
     @property
     def trigger(self):
         return self._trigger
-
-    @property
-    def update_op(self):
-        return self._update_op
 
     def set_T(self, session, T):
         return session.run(self._set_T, feed_dict={self._new_T: T})
@@ -531,24 +537,19 @@ class RMSpropOptimizer(object):
         self._decay = decay
         self._config = model.config
         self._eps = model.config.opt_eps
-        self._max_grad_norm = model.config.max_grad_norm
         self._max_update_norm = model.config.max_update_norm
         self._lr = model.config.lr
-        self._c_lipschitz = model.config.opt_c_lipsc
-        self._ms = []
-        self._ms_accu_op = []
-        self._mom = []
+
         self._grads = grads
         self._tvars = tvars
 
+        self._ms = []
+        self._ms_accu_op = []
         for tvar, g in zip(tvars, grads):
             self._ms.append(tf.get_variable(g.op.name + "_ms",
-                                                     initializer=tf.ones_like(tvar, dtype=tf.float32)/1000,
+                                                     initializer=tf.ones_like(tvar, dtype=tf.float32) / 100,
                                                      trainable=False))
 
-            self._mom.append(tf.get_variable(g.op.name + "_mom",
-                                                     initializer=tf.zeros_like(tvar, dtype=tf.float32),
-                                                     trainable=False))
             g = tf.convert_to_tensor(g)
             with tf.name_scope("set_global_vars"), tf.control_dependencies([g]):
                 self._ms_accu_op.append(tf.assign(self._ms[-1],
@@ -563,44 +564,20 @@ class RMSpropOptimizer(object):
             logger.info("inversion stability by thresholding eigen-values by epsilon")
 
         # compute updates
-        if self._max_update_norm > 0 and self._config.opt_clip_by_var:
-            # print("clipping update per var")
-            logger.info("clipping update per var")
-        for tvar, grad, ms in zip(tvars, grads, self._ms):
-            self._updates.append(self.update(grad, ms))
+        with tf.control_dependencies(self._ms_accu_op):
+            for grad, ms in zip(grads, self._ms):
+                self._updates.append(tf.multiply(self._lr,self.update(grad, ms)))
 
         # clip updates
         if self._max_update_norm > 0:
-            if self._config.opt_clip_by_var:
-                # print("clipping total update")
-                logger.info("clipping update by layer")
-                self._clipped_updates = self.clip_by_layer()
-            else:
-                # print("clipping total update")
-                logger.info("clipping total update")
-                self._clipped_updates, _  = tf.clip_by_global_norm(self._updates, self._max_update_norm)
-        else:
-            self._clipped_updates = self._updates
+            logger.info("clipping total update")
+            self._updates, _ = tf.clip_by_global_norm(self._updates, self._max_update_norm)
 
-        # apply updates
-        if self._config.opt_mom == 0:
-            # print("no momentum")
-            logger.info("no momentum")
-            for i, tvar in enumerate(tvars):
-                delta = tf.multiply(-self._lr, self._clipped_updates[i])
-                self._train_op.append(tf.assign_add(tvar, delta))
-        elif  0 < self._config.opt_mom < 1 :
-            # print("momentum is ", self._config.opt_mom)
-            logger.info("momentum is %.2f" % self._config.opt_mom)
-            for i, (tvar, mom) in enumerate(zip(tvars, self._mom)):
-                update = tf.multiply(self._lr, self._clipped_updates[i])
-                delta = self._config.opt_mom * mom + update
-                self._train_op.extend([tf.assign_add(tvar, -delta), tf.assign(mom, delta)])
-        else:
-            logger.exception("opt_mom can take values in [0,1)")
-            raise ValueError("opt_mom can take values in [0,1)")
+        # apply updates op
 
-        self._train_op.extend(self._ms_accu_op)
+        for i, tvar in enumerate(tvars):
+            self._train_op.append(tf.assign_add(tvar, -self._updates[i]))
+
 
     def update(self, grad, ms):
         if self._config.opt_inverse_type == "add":
@@ -611,17 +588,11 @@ class RMSpropOptimizer(object):
         else:
             raise ValueError("opt_inverse_type has invalid value")
 
-        if self._max_update_norm > 0 and self._config.opt_clip_by_var:
-            update = tf.cond(tf.greater_equal(self._max_update_norm, tf.norm(update)),
-                             true_fn=lambda:update,
-                             false_fn=lambda:tf.divide(update, tf.norm(update))*self._max_update_norm)
-
-
         return update
 
     @property
     def updates(self):
-        return self._clipped_updates
+        return self._updates
 
     @property
     def train_op(self):
@@ -648,12 +619,12 @@ class RMSpropOptimizer(object):
     def clip_by_layer(self):
         L = self._config.lstm_layers_num
         updates = list()
-        clipped, _ = tf.clip_by_global_norm([self._updates[0],self._updates[1]], self._max_update_norm * self._c_lipschitz ** (L+2))
+        clipped, _ = tf.clip_by_global_norm([self._updates[0],self._updates[1]], self._max_update_norm)
         updates.extend(clipped)
         for i in range(L):
             k = 2 + 2 * i
             clipped, _ = tf.clip_by_global_norm([self._updates[k], self._updates[k + 1]],
-                                                  self._max_update_norm * self._c_lipschitz ** (L+1 - i))
+                                                  self._max_update_norm)
             updates.extend(clipped)
 
         updates.append(tf.clip_by_norm(self._updates[-1], self._max_update_norm))
@@ -704,61 +675,6 @@ def tvars_num():
     return nvars
 
 
-# def run_epoch(session, model, eval_op=None, verbose=True):
-#     """run the given model over its data"""
-#
-#     start_time = time.time()
-#
-#     if eval_op is not None:
-#         model.input.shuffle()
-#
-#     losses = 0.0
-#     iters = 0
-#
-#     # zeros initial state for all devices
-#     state = session.run(model.initial_state)
-#     feed_dict_masks = {}
-#     # if variational every epoch --> update masks
-#     if config.variational == 'epoch' and eval_op is not None:
-#         feed_dict_masks = model.gen_masks(session)
-#
-#     # evaluate loss and final state for all devices
-#     fetches = {"loss": model.loss,
-#                "final_state": model.final_state}
-#
-#     # perform train op if training
-#     if eval_op is not None:
-#         fetches["eval_op"] = eval_op
-#
-#     for step in range(model.input.epoch_size):
-#         # if variational every batch --> update masks
-#         if config.variational == 'batch' and eval_op is not None:
-#             feed_dict_masks = model.gen_masks(session)
-#
-#         # pass states between time batches
-#         feed_dict = dict(feed_dict_masks.items())
-#         for j, (c, h) in enumerate(model.initial_state):
-#             feed_dict[c] = state[j].c
-#             feed_dict[h] = state[j].h
-#
-#         feed_dict.update(model.input.get_batch(step*model.input.time_steps))
-#
-#         vals = session.run(fetches, feed_dict)
-#
-#         loss = vals["loss"]
-#         state = vals["final_state"]
-#
-#         losses += loss
-#         iters += model.input.time_steps
-#
-#         if verbose and step % (model.input.epoch_size // 10) == 10:
-#             logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
-#                   (step * 1.0 / model.input.epoch_size, np.exp(losses / iters), np.log2(np.exp(losses / iters)),
-#                    iters * model.input.batch_size / (time.time() - start_time)))
-#
-#     return np.exp(losses / iters)
-
-
 def run_epoch(session, model, eval_op=None, verbose=True):
     """run the given model over its data"""
     if eval_op is not None:
@@ -776,7 +692,7 @@ def run_epoch(session, model, eval_op=None, verbose=True):
     if config.variational == 'epoch' and eval_op is not None:
         # generate masks for epoch
         feed_dict_masks = model.gen_masks(session)
-
+        feed_dict_masks.update(model.gen_emb_mask(session))
         # randomize words to drop from the vocabulary
         if config.drop_i < 1.0:
             words2drop = list()
@@ -812,7 +728,9 @@ def run_epoch(session, model, eval_op=None, verbose=True):
         feed_dict.update(model.input.get_batch(step*model.input.time_steps))
 
         if eval_op is not None:
-            feed_dict.update(model.gen_emb_mask(session))
+            if not config.drop_embed_var:
+                feed_dict.update(model.gen_emb_mask(session))
+
             if config.drop_i < 1.0:
                 for i, batch in enumerate(feed_dict[model.input.input_data]):
                     for j, w in enumerate(batch):
@@ -828,6 +746,7 @@ def run_epoch(session, model, eval_op=None, verbose=True):
         losses += loss
         iters += model.input.time_steps
 
+
         if verbose and step % (model.input.epoch_size // 10) == 10:
             logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
                   (step * 1.0 / model.input.epoch_size, np.exp(losses / iters), np.log2(np.exp(losses / iters)),
@@ -839,75 +758,13 @@ def run_epoch(session, model, eval_op=None, verbose=True):
     return np.exp(losses / iters)
 
 
-# def asgd_run_epoch(session, model, eval_op=None, verbose=True):
-#     """run the given model over its data"""
-#
-#     start_time = time.time()
-#
-#     if eval_op is not None:
-#         model.input.shuffle()
-#
-#     losses = 0.0
-#     iters = 0
-#
-#     # zeros initial state for all devices
-#     state = session.run(model.initial_state)
-#
-#     feed_dict_masks = {}
-#     # if variational every epoch --> update masks
-#     if config.variational == 'epoch' and eval_op is not None:
-#         feed_dict_masks = model.gen_masks(session)
-#
-#     # evaluate loss and final state for all devices
-#     fetches = {
-#         "loss": model.loss,
-#         "final_state": model.final_state
-#     }
-#
-#     # perform train op if training
-#     if eval_op is not None:
-#         fetches["eval_op"] = eval_op
-#         fetches["update_op"] = model.optimizer.update_op
-#
-#     for step in range(model.input.epoch_size):
-#         # if variational every batch --> update masks
-#         if config.variational == 'batch' and eval_op is not None:
-#             feed_dict_masks = model.gen_masks(session)
-#
-#         # pass states between time batches
-#         feed_dict = dict(feed_dict_masks.items())
-#         for j, (c, h) in enumerate(model.initial_state):
-#             feed_dict[c] = state[j].c
-#             feed_dict[h] = state[j].h
-#
-#         feed_dict.update(model.input.get_batch(step*model.input.time_steps))
-#
-#         vals = session.run(fetches, feed_dict)
-#
-#         loss = vals["loss"]
-#         state = vals["final_state"]
-#
-#         losses += loss
-#         iters += model.input.time_steps
-#
-#         if verbose and step % (model.input.epoch_size // 10) == 10:
-#             logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
-#                   (step * 1.0 / model.input.epoch_size, np.exp(losses / iters), np.log2(np.exp(losses / iters)),
-#                    iters * model.input.batch_size / (time.time() - start_time)))
-#
-#         if step == model.input.epoch_size - 1 and eval_op is not None:
-#             logger.info("trigger: " + str(vals["update_op"][0]) + "\tT: " + str(vals["update_op"][1]))
-#
-#     return np.exp(losses / iters)
-
-
 def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver):
     """ Trains the network by the given optimizer """
 
     global bestVal
 
     def stop_criteria(epoch):
-        stop_window = 7
+        stop_window = 5
         if epoch == epochs_num - 1:
             return True
 
@@ -920,17 +777,7 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
         else:
             return False
 
-    epochs_num = config.layer_epoch if layer != -1 else config.entire_network_epoch
-
-    # if config.opt == "sgd" or config.opt == "rms":
-    run_e = run_epoch
-    # elif config.opt == "asgd":
-    #     run_e = asgd_run_epoch
-    # elif config.opt == "arms" or config.opt == "marms" or config.opt == "masgd":
-    #     run_e = arms_run_epoch
-    # else:
-    #     logger.exception("no valid optimizer")
-    #     raise ValueError("no valid optimizer")
+    epochs_num = config.layer_epoch
 
     logger.info("updating dropout probabilities")
     m.update_drop_params(session, config.drop_output, config.drop_state)
@@ -942,16 +789,16 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
 
     lr_decay = config.lr_decay
     current_lr = session.run(m.lr)
-    m.assign_lr(session, current_lr)
 
-    valid_perplexity = []
-    i = session.run(m.epoch)
+
     if config.opt == "asgd" or config.opt == "arms":
-        validation_tolerance = 5
+        validation_tolerance = 1
 
     if config.opt == "masgd" or config.opt == "marms":
         lr_decay = 1.0
 
+    valid_perplexity = []
+    i = session.run(m.epoch)
     should_stop = False
     while not should_stop:
         start_time = time.time()
@@ -961,32 +808,35 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
             lr_sum = tf.Summary(value=[tf.Summary.Value(tag="learning_rate_track" + str(layer),
                                                        simple_value=current_lr)])
             train_writer.add_summary(lr_sum, i + 1)
-            if config.opt == "asgd" or config.opt == "arms"  and not session.run(m.optimizer.trigger):
+            if config.opt == "asgd" or config.opt == "arms" and not session.run(m.optimizer.trigger):
                 validation_tolerance -= 1
                 if validation_tolerance == 0:
-                    # print("setting trigger and T")
                     logger.info("setting trigger and T")
                     m.optimizer.set_trigger(session)
-                    m.optimizer.set_T(session, i + 1)
+                    m.optimizer.set_T(session, i)
                     lr_decay = 1.0
 
-        logger.info("Epoch: %d Learning rate: %.6f" % (i + 1, session.run(m.lr)))
+        logger.info("Epoch: %d Learning rate: %.3f Max Update Norm: %.3f" % (i + 1, session.run(m.lr), config.max_update_norm))
+
+        if config.opt == "asgd" or config.opt == "arms":
+            logger.info("Trigger is %s" % bool(session.run(m.optimizer.trigger)))
 
         ###################################### train ######################################
-        train_perplexity = run_e(session, m, eval_op=m.train_op, verbose=True)
+        train_perplexity = run_epoch(session, m, eval_op=m.train_op, verbose=True)
         train_sum = tf.Summary(value=[tf.Summary.Value(tag="train_perplexity_layer" + str(layer),
                                                        simple_value=train_perplexity)])
         train_writer.add_summary(train_sum, i + 1)
         logger.info("Epoch: %d Train Perplexity: %.3f Bits: %.3f " % (i + 1, train_perplexity, np.log2(train_perplexity)))
 
-        if config.opt == "asgd" or config.opt == "arms" and session.run(m.optimizer.trigger) or config.opt == "marms":
+        if ((config.opt == "asgd" or config.opt == "arms") and session.run(m.optimizer.trigger)) \
+                or config.opt == "marms" or config.opt == "masgd":
             logger.info("saving model weights....")
             session.run(m.optimizer.save_vars)
             logger.info("setting averaged weights....")
             session.run(m.optimizer.final_assign_op)
 
         ###################################### valid ######################################
-        valid_perplexity.append(run_e(session, mvalid, verbose=False))
+        valid_perplexity.append(run_epoch(session, mvalid, verbose=False))
         valid_sum = tf.Summary(value=[tf.Summary.Value(tag="valid_perplexity_layer" + str(layer),
                                                        simple_value=valid_perplexity[-1])])
         valid_writer.add_summary(valid_sum, i + 1)
@@ -1008,22 +858,18 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
         else:
             should_stop = stop_criteria(i)
 
-        if config.opt == "asgd" or config.opt == "arms" and session.run(m.optimizer.trigger) and not should_stop:
-                # print("loading model weights....")
+        if ((config.opt == "asgd" or config.opt == "arms") and session.run(m.optimizer.trigger)) \
+                or config.opt == "marms" or config.opt == "masgd":
                 logger.info("loading model weights....")
                 session.run(m.optimizer.load_vars)
-        elif config.opt == "marms" and not should_stop:
-                # print("loading model weights....")
-                logger.info("loading model weights....")
-                session.run(m.optimizer.load_vars)
+
 
         elapsed = time.time() - start_time
         logger.info("Epoch: %d took %02d:%02d\n" % (i + 1, elapsed // 60, elapsed % 60))
         i = m.epoch_inc(session)
 
-    if not (config.opt == "asgd" or config.opt == "arms" or config.opt == "marms"):
-        logger.info("restoring best model of current optimizer....")
-        saver.restore(session, directory + '/saver/best_model' + str(layer))
+    logger.info("restoring best model of current optimizer....")
+    saver.restore(session, directory + '/saver/best_model' + str(layer))
     m.epoch_reset(session)
 
 
@@ -1325,7 +1171,6 @@ if __name__ == "__main__":
     ap.add_argument("--opt_mom_decay",      type=float, default=None, help="optimizer momentum decay")
     ap.add_argument("--lr",                 type=float, default=None, help="training learning rate")
     ap.add_argument("--lr_decay",           type=float, default=None, help="learning rate decay")
-    ap.add_argument("--max_grad_norm",      type=float, default=None, help="max grad norm")
     ap.add_argument("--max_update_norm",    type=float, default=None, help="max update norm")
     ap.add_argument("--batch_size",         type=int, default=None, help="batch size")
     ap.add_argument("--time_steps",         type=int, default=None, help="bptt truncation")
