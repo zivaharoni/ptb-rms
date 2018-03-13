@@ -1,10 +1,10 @@
 class SmallConfig(object):
     forget_bias_init = 0.0
     init_scale = 0.04
-    batch_size = 100
+    batch_size = 200
     time_steps = 35
-    units_num = [650, 650, 280]
-    embedding_size = 280
+    units_num = [650, 650, 400]
+    embedding_size = 400
     vocab_size = 10000
     lstm_layers_num = 3
     seed = 570164
@@ -12,7 +12,6 @@ class SmallConfig(object):
     opt = "marms"
     opt_eps = 1e-5
     opt_inverse_type = "add"
-    opt_clip_by_var = None
 
     lr = 1.0
     lr_decay = 1.0
@@ -28,7 +27,7 @@ class SmallConfig(object):
     keep_prob_embed = 0.35
     drop_output = [0.65,0.3]
     drop_state = [0.65,0.65]
-    drop_i = 0.9
+    drop_i = 1.0
     drop_embed_var = False
 
 
