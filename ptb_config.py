@@ -25,7 +25,7 @@ class SmallConfig(object):
     TAR = 2.0
     variational = 'epoch'
     keep_prob_embed = 0.4
-    drop_output = [0.65,0.35]
+    drop_output = [0.65,0.30]
     drop_state = [0.65,0.65]
     drop_i = 0.95
     drop_embed_var = False
@@ -37,25 +37,25 @@ class SmallConfig(object):
 class MosConfig(object):
     forget_bias_init = 0.0
     init_scale = 0.04
-    batch_size = 200
+    batch_size = 80
     time_steps = 35
-    units_num = [300, 300, 280]
+    units_num = [960, 960, 620]
     embedding_size = 280
     vocab_size = 10000
     lstm_layers_num = 3
     seed = 570164
 
-    opt = "marms"
+    opt = "masgd"
     opt_eps = 1e-5
     opt_inverse_type = "add"
 
-    lr = 1.0
+    lr = 20.0
     lr_decay = 1.0
-    max_update_norm = 2.5
-    layer_epoch = 2
+    max_update_norm = 0.75
+    layer_epoch = 1000
     entire_network_epoch = layer_epoch
 
-    GL = True
+    GL = False
     DC = False
     AR = 1.0
     TAR = 2.0
@@ -66,7 +66,7 @@ class MosConfig(object):
     drop_i = 1.0
     drop_embed_var = False
 
-    mos = False
+    mos = True
     mos_context_num = 15
     mos_drop = 0.71
 
