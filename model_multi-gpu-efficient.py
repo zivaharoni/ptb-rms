@@ -17,7 +17,7 @@ import rnn_cell_additions as dr
 import argparse
 import logging
 import shutil
-
+from tensorflow.python.client import timeline
 
 class PTBModel(object):
     """class for handling the ptb model"""
@@ -32,6 +32,11 @@ class PTBModel(object):
         self._gpu_devices = [i for i in range(len(get_gpu_devices(args.gpu_devices)))][0]
         self._cpu_device = args.cpu_device
         self._config = config
+        self._debug_ops = list()
+
+        if config.mos:
+            self._mos_mask = None
+            self._gen_mos_mask = None
 
         with tf.name_scope("model_variables"):
             with tf.name_scope("global_step"):
@@ -210,9 +215,9 @@ class PTBModel(object):
                 lstm_output.append(tf.reshape(tf.concat(values=outputs[i], axis=1), [-1, lstm_size]))
 
         # outer embedding bias
-        b_embed_out = tf.get_variable(name="b_embed_out", shape=[vocab_size], dtype=tf.float32)
+        # b_embed_out = tf.get_variable(name="b_embed_out", shape=[vocab_size], dtype=tf.float32)
 
-        if config.embedding_size == config.units_num[-1]:
+        if config.embedding_size == config.units_num[-1] or config.mos:
             # outer softmax matrix is tied with embedding matrix
             if is_training:
                 logger.info("tied embedding")
@@ -224,13 +229,57 @@ class PTBModel(object):
 
         with tf.name_scope("loss"):
             with tf.name_scope("data_loss"):
-                logits = tf.matmul(lstm_output[-1], w_out) + b_embed_out
-                softmax = tf.nn.softmax(logits)
-                losses = tf.contrib.legacy_seq2seq.sequence_loss_by_example([logits],
+                if config.mos:
+                    logger.info("using mos with %d contexts" % config.mos_context_num)
+                    with tf.name_scope("mos"):
+                        # eps = 1e-20
+                        self._mos_mask = tf.placeholder(dtype=tf.float32,
+                                                        shape=[config.batch_size*config.time_steps*config.mos_context_num, config.embedding_size],
+                                                        name="mos_mask")
+                        with tf.name_scope("mos_mask_gen"):
+                            random_tensor = ops.convert_to_tensor(config.mos_drop)
+                            random_tensor += random_ops.random_uniform([config.batch_size*config.mos_context_num, config.embedding_size])
+                            random_tensor = tf.tile(random_tensor, [config.time_steps, 1])
+                            self._gen_mos_mask = math_ops.floor(random_tensor)
 
-                                                                            [tf.reshape(targets, [-1])],
-                                                                            [tf.ones([batch_size * time_steps],
-                                                                                     dtype=tf.float32)])
+                        # pi
+                        prior = tf.get_variable(name="pi",
+                                                shape=[config.units_num[-1], config.mos_context_num],
+                                                dtype=tf.float32)
+                        prior = tf.matmul(lstm_output[-1], prior)
+                        pi = tf.nn.softmax(prior, name="prior")
+
+                        # context vectors
+                        w_h = tf.get_variable(name="w_h",
+                                              shape=[config.units_num[-1], config.mos_context_num*config.embedding_size],
+                                              dtype=tf.float32)
+                        h = tf.reshape(tf.matmul(lstm_output[-1], w_h),[-1, config.embedding_size])
+                        if is_training and config.mos_drop < 1.0:
+                            h = math_ops.div(h, config.mos_drop) * self._mos_mask
+                        a = tf.reshape(tf.matmul(h, w_out),[-1, config.mos_context_num, config.vocab_size])
+
+                            # a = tf.nn.dropout(a, config.mos_drop)
+
+                        # mos
+                        a_mos = tf.exp(a)
+                        weighted_softmax = tf.multiply(a_mos, pi[:, :, tf.newaxis])
+                        softmax = tf.reduce_sum(weighted_softmax, axis=1)
+                        # indices = tf.transpose(tf.stack([tf.range(0, softmax.shape.as_list()[0], dtype=tf.int32), tf.reshape(targets, [-1])]))
+                        # loss_arg_clipped = tf.clip_by_value(tf.gather_nd(softmax, indices), eps, 1-eps)
+                        # losses = -tf.log(loss_arg_clipped)
+                        log_softmax = tf.log(softmax)
+                    losses = tf.contrib.legacy_seq2seq.sequence_loss_by_example([log_softmax],
+                                                                                [tf.reshape(targets, [-1])],
+                                                                                [tf.ones([batch_size * time_steps],
+                                                                                         dtype=tf.float32)])
+                else:
+                    logits = tf.matmul(lstm_output[-1], w_out) # + b_embed_out
+                    softmax = tf.nn.softmax(logits)
+                    losses = tf.contrib.legacy_seq2seq.sequence_loss_by_example([logits],
+
+                                                                                [tf.reshape(targets, [-1])],
+                                                                                [tf.ones([batch_size * time_steps],
+                                                                                         dtype=tf.float32)])
             if config.AR and is_training:
                 with tf.name_scope("AR"):
                     for j in range(config.lstm_layers_num):
@@ -246,8 +295,7 @@ class PTBModel(object):
             loss = tf.reduce_sum(losses) / batch_size
 
         with tf.name_scope("compute_grads"):
-                grad = tf.gradients(loss, tf.trainable_variables())
-                grads = grad
+            grads = tf.gradients(loss, tf.trainable_variables())
 
         final_state = state
 
@@ -276,10 +324,6 @@ class PTBModel(object):
     @property
     def optimizer(self):
         return self._optimizer
-
-    @property
-    def rms(self):
-        return self._rms
 
     @property
     def input(self):
@@ -318,6 +362,8 @@ class PTBModel(object):
         feed_dict = {}
         for i in range(config.lstm_layers_num):
             feed_dict.update(self._cell[i].gen_masks(session))
+        if self._config.mos:
+            feed_dict.update({self._mos_mask: session.run(self._gen_mos_mask)})
         return feed_dict
 
     def gen_emb_mask(self, session):
@@ -373,7 +419,9 @@ class PTBInput(object):
 class SGDOptimizer(object):
     def __init__(self, model, grads, tvars):
 
-        self._updates = [model.lr * g for g in grads]
+        self._updates = list()
+        for g in grads:
+            self._updates.append(model.lr * g)
         optimizer = tf.train.GradientDescentOptimizer(1.0)
 
         if config.max_update_norm > 0:
@@ -920,12 +968,10 @@ def read_flags(config, args):
 def get_config(config_name):
     if config_name == "small":
         return config_pool.SmallConfig()
-    if config_name == "big":
-        return config_pool.BigConfig()
-    if config_name == "bigger":
-        return config_pool.BiggerConfig()
-    if config_name == "test":
-        return config_pool.TestConfig()
+    if config_name == "mos":
+        return config_pool.MosConfig()
+    if config_name == "best":
+        return config_pool.BestConfig()
     else:
         raise ValueError("Invalid model: %s", config_name)
 
@@ -958,17 +1004,25 @@ def get_gpu_devices(str):
     return devices_num
 
 
-def get_vars2restore(layer):
+def get_vars2restore(layer, units_num):
     if layer == 0:
         return None
     else:
         vars2load = []
         for var in tf.trainable_variables():
-            lstm_idx = re.findall("lstm([0-9])+", var.op.name)
-            if len(lstm_idx) == 0:
-                vars2load.append(var)
-            elif int(lstm_idx[0]) <= layer:
-                vars2load.append(var)
+            print(var.op.name)
+            if var.op.name == "Model/w_embed_out":
+                 if units_num[layer] == units_num[layer-1]:
+                     print("added")
+                     vars2load.append(var)
+            else:
+                lstm_idx = re.findall("lstm([0-9])+", var.op.name)
+                if len(lstm_idx) == 0:
+                    print("added")
+                    vars2load.append(var)
+                elif int(lstm_idx[0]) <= layer:
+                    vars2load.append(var)
+                    print("added")
 
         return vars2load
 
@@ -1056,7 +1110,7 @@ def main():
                              valid_input.epoch_size))
 
             saver = tf.train.Saver(var_list=tf.trainable_variables())
-            vars2load = get_vars2restore(layer)
+            vars2load = get_vars2restore(layer, units_num)
             if vars2load is not None and GL:
                 restore_saver = tf.train.Saver(var_list=vars2load)
 
@@ -1199,12 +1253,16 @@ if __name__ == "__main__":
     ap.add_argument("--keep_prob_embed",    type=float, default=None, help="keep prob for embedding")
     ap.add_argument("--opt_c_lipsc",        type=float, default=None, help="for lwgc")
     ap.add_argument("--drop_i",             type=float, default=None, help="drop words")
+    ap.add_argument("--mos_drop",           type=float, default=None, help="drop mos")
+    ap.add_argument("--mos_context_num",    type=int, default=None, help="#of experts")
+    ap.add_argument("--mos",                dest='mos', action='store_true')
     ap.add_argument("--no_eval",            dest='no_eval', action='store_true')
     ap.add_argument("--GL",                 dest='GL', action='store_false')
     ap.add_argument('--verbose',            dest='verbose', action='store_true')
     ap.add_argument('--save',               dest='save', action='store_true')
     ap.add_argument('--drop_embed_var',     dest='drop_embed_var', action='store_true')
 
+    ap.set_defaults(mos=None)
     ap.set_defaults(no_eval=None)
     ap.set_defaults(drop_embed_var=None)
     ap.set_defaults(opt_clip_by_var=None)

@@ -3,40 +3,7 @@ class SmallConfig(object):
     init_scale = 0.04
     batch_size = 200
     time_steps = 35
-    units_num = [650, 650, 400]
-    embedding_size = 400
-    vocab_size = 10000
-    lstm_layers_num = 3
-    seed = 570164
-
-    opt = "marms"
-    opt_eps = 1e-5
-    opt_inverse_type = "add"
-
-    lr = 1.0
-    lr_decay = 1.0
-    max_update_norm = 1.0
-    layer_epoch = 500
-    entire_network_epoch = layer_epoch
-
-    GL = True
-    DC = False
-    AR = 1.0
-    TAR = 2.0
-    variational = 'epoch'
-    keep_prob_embed = 0.35
-    drop_output = [0.65,0.3]
-    drop_state = [0.65,0.65]
-    drop_i = 1.0
-    drop_embed_var = False
-
-
-class BigConfig(object):
-    forget_bias_init = 0.0
-    init_scale = 0.04
-    batch_size = 100
-    time_steps = 35
-    units_num = 650
+    units_num = [650, 650, 650]
     embedding_size = 650
     vocab_size = 10000
     lstm_layers_num = 3
@@ -45,11 +12,10 @@ class BigConfig(object):
     opt = "marms"
     opt_eps = 1e-5
     opt_inverse_type = "add"
-    opt_clip_by_var = None
 
-    lr = 1.0
+    lr = 10.0
     lr_decay = 1.0
-    max_update_norm = 1.0
+    max_update_norm = 0.75
     layer_epoch = 500
     entire_network_epoch = layer_epoch
 
@@ -58,13 +24,51 @@ class BigConfig(object):
     AR = 1.0
     TAR = 2.0
     variational = 'epoch'
-    keep_prob_embed = 0.35
-    drop_output = [0.65,0.3]
+    keep_prob_embed = 0.4
+    drop_output = [0.65,0.35]
     drop_state = [0.65,0.65]
-    drop_i = 0.9
+    drop_i = 0.95
     drop_embed_var = False
 
+    mos = False
+    mos_context_num = 0
+    mos_drop = 0.0
 
+class MosConfig(object):
+    forget_bias_init = 0.0
+    init_scale = 0.04
+    batch_size = 200
+    time_steps = 35
+    units_num = [300, 300, 280]
+    embedding_size = 280
+    vocab_size = 10000
+    lstm_layers_num = 3
+    seed = 570164
+
+    opt = "marms"
+    opt_eps = 1e-5
+    opt_inverse_type = "add"
+
+    lr = 1.0
+    lr_decay = 1.0
+    max_update_norm = 2.5
+    layer_epoch = 2
+    entire_network_epoch = layer_epoch
+
+    GL = True
+    DC = False
+    AR = 1.0
+    TAR = 2.0
+    variational = 'epoch'
+    keep_prob_embed = 0.6
+    drop_output = [0.775,0.6]
+    drop_state = [0.5,0.5]
+    drop_i = 1.0
+    drop_embed_var = False
+
+    mos = False
+    mos_context_num = 15
+    mos_drop = 0.71
 
 
 class BestConfig(object):
