@@ -33,6 +33,7 @@ class PTBModel(object):
         self._cpu_device = args.cpu_device
         self._config = config
         self._debug_ops = list()
+        self._stat_ops = list()
 
         if config.mos:
             self._mos_mask = None
@@ -56,7 +57,7 @@ class PTBModel(object):
             b_embed_in = tf.get_variable(name="b_embed_in", shape=[config.embedding_size], dtype=tf.float32)
             embedding = tf.nn.embedding_lookup(embedding_map, self._input.input_data) + b_embed_in
 
-            if is_training and config.keep_prob_embed < 1:
+            if is_training and (config.keep_prob_embed < 1 or config.drop_i < 1):
                 # non variational wrapper for the embedding
 
                 self._emb_mask = tf.placeholder(dtype=tf.float32, shape=[config.batch_size, config.time_steps, config.embedding_size],
@@ -111,22 +112,22 @@ class PTBModel(object):
                     self._optimizer = SGDOptimizer(self, grads, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "asgd":
-                    opt = SGDOptimizer(self, grads, tvars)
+                    opt = SGDOptimizer(self, grads, tvars, use_opt=False)
                     self._optimizer = ASGDOptimizer(self, opt.updates, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "masgd":
-                    opt = SGDOptimizer(self, grads, tvars)
+                    opt = SGDOptimizer(self, grads, tvars, use_opt=False)
                     self._optimizer = MASGDOptimizer(self, opt.updates, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "rms":
                     self._optimizer = RMSpropOptimizer(self, grads, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "arms":
-                    opt = RMSpropOptimizer(self, grads, tvars)
+                    opt = RMSpropOptimizer(self, grads, tvars, use_opt=False)
                     self._optimizer = ASGDOptimizer(self, opt.updates, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "marms":
-                    opt = RMSpropOptimizer(self, grads, tvars)
+                    opt = RMSpropOptimizer(self, grads, tvars, use_opt=False)
                     self._optimizer = MASGDOptimizer(self, opt.updates, tvars)
                     self._train_op = self._optimizer.train_op
                 else:
@@ -232,7 +233,7 @@ class PTBModel(object):
                 if config.mos:
                     logger.info("using mos with %d contexts" % config.mos_context_num)
                     with tf.name_scope("mos"):
-                        # eps = 1e-20
+
                         self._mos_mask = tf.placeholder(dtype=tf.float32,
                                                         shape=[config.batch_size*config.time_steps*config.mos_context_num, config.embedding_size],
                                                         name="mos_mask")
@@ -248,54 +249,66 @@ class PTBModel(object):
                                                 dtype=tf.float32)
                         prior = tf.matmul(lstm_output[-1], prior)
                         pi = tf.nn.softmax(prior, name="prior")
-
                         # context vectors
                         w_h = tf.get_variable(name="w_h",
                                               shape=[config.units_num[-1], config.mos_context_num*config.embedding_size],
                                               dtype=tf.float32)
-                        h = tf.reshape(tf.matmul(lstm_output[-1], w_h),[-1, config.embedding_size])
+                        b_h = tf.get_variable(name="b_h",
+                                              shape=[config.mos_context_num * config.embedding_size],
+                                              dtype=tf.float32)
+                        h = tf.reshape(tf.tanh(tf.matmul(lstm_output[-1], w_h) + b_h),[-1, config.embedding_size])
                         if is_training and config.mos_drop < 1.0:
                             h = math_ops.div(h, config.mos_drop) * self._mos_mask
-                        a = tf.reshape(tf.matmul(h, w_out),[-1, config.mos_context_num, config.vocab_size])
-
-                            # a = tf.nn.dropout(a, config.mos_drop)
-
+                        a = tf.reshape(tf.matmul(h, w_out),[-1, config.vocab_size])
                         # mos
-                        a_mos = tf.exp(a)
-                        weighted_softmax = tf.multiply(a_mos, pi[:, :, tf.newaxis])
+                        a_mos = tf.reshape(tf.nn.softmax(a), [-1, config.mos_context_num, config.vocab_size])
+                        pi = tf.reshape(pi, [-1, config.mos_context_num, 1])
+                        pi_exp = tf.tile(pi, [1, 1, config.vocab_size])
+                        weighted_softmax = tf.multiply(a_mos, pi_exp)
                         softmax = tf.reduce_sum(weighted_softmax, axis=1)
-                        # indices = tf.transpose(tf.stack([tf.range(0, softmax.shape.as_list()[0], dtype=tf.int32), tf.reshape(targets, [-1])]))
-                        # loss_arg_clipped = tf.clip_by_value(tf.gather_nd(softmax, indices), eps, 1-eps)
-                        # losses = -tf.log(loss_arg_clipped)
-                        log_softmax = tf.log(softmax)
-                    losses = tf.contrib.legacy_seq2seq.sequence_loss_by_example([log_softmax],
-                                                                                [tf.reshape(targets, [-1])],
-                                                                                [tf.ones([batch_size * time_steps],
-                                                                                         dtype=tf.float32)])
+                        # loss
+                        indices = tf.transpose(tf.stack([tf.range(0, softmax.shape.as_list()[0], dtype=tf.int32), tf.reshape(targets, [-1])]))
+                        loss_arg_clipped = tf.gather_nd(softmax, indices)
+                        eps = 1e-8
+                        loss_arg_clipped += eps
+                        losses = -tf.log(loss_arg_clipped)
+
+                    loss = tf.reduce_sum(losses) / batch_size
                 else:
-                    logits = tf.matmul(lstm_output[-1], w_out) # + b_embed_out
+                    logits = tf.matmul(lstm_output[-1], w_out)
                     softmax = tf.nn.softmax(logits)
                     losses = tf.contrib.legacy_seq2seq.sequence_loss_by_example([logits],
-
                                                                                 [tf.reshape(targets, [-1])],
                                                                                 [tf.ones([batch_size * time_steps],
                                                                                          dtype=tf.float32)])
+                    loss = tf.reduce_sum(losses) / batch_size
+
             if config.AR and is_training:
+                logger.info("using activation regularization")
                 with tf.name_scope("AR"):
-                    for j in range(config.lstm_layers_num):
-                        losses += config.AR * tf.reduce_mean(tf.square(tf.reshape(lstm_output[j], [-1, 1])))
+                    # for j in range(config.lstm_layers_num):
+                    loss += config.AR * tf.reduce_mean(tf.square(tf.reshape(lstm_output[-1], [-1, 1])))
 
             if config.TAR and is_training:
+                logger.info("using temporal activation regularization")
                 with tf.name_scope("TAR"):
-                    for j in range(config.lstm_layers_num):
-                        outputs_reshaped = tf.reshape(lstm_output[j], [config.batch_size, config.time_steps, -1])
-                        diff = outputs_reshaped[:, :-1, :] - outputs_reshaped[:, 1:, :]
-                        losses += config.TAR * tf.reduce_mean(tf.square(tf.reshape(diff, [-1, 1])))
+                    # for j in range(config.lstm_layers_num):
+                    outputs_reshaped = tf.reshape(lstm_output[-1], [config.batch_size, config.time_steps, -1])
+                    diff = outputs_reshaped[:, :-1, :] - outputs_reshaped[:, 1:, :]
+                    loss += config.TAR * tf.reduce_mean(tf.square(tf.reshape(diff, [-1, 1])))
 
-            loss = tf.reduce_sum(losses) / batch_size
+            if config.wdecay and is_training:
+                logger.info("using L2 regularization")
+                for tvar in tf.trainable_variables():
+                    loss += config.wdecay * tf.reduce_sum(tf.square(tf.reshape(tvar, [-1, 1])))
+
 
         with tf.name_scope("compute_grads"):
             grads = tf.gradients(loss, tf.trainable_variables())
+
+            if args.collect_stat:
+                self._stat_ops.append(tf.add_n([tf.square(tf.norm(g)) for g in grads]))
+
 
         final_state = state
 
@@ -349,6 +362,10 @@ class PTBModel(object):
     def emb_mask(self):
         return self._emb_mask
 
+    @property
+    def stat_ops(self):
+        return self._stat_ops
+
     def assign_lr(self, session, lr_value):
         session.run(self._lr_update, feed_dict={self._new_lr: lr_value})
 
@@ -362,6 +379,8 @@ class PTBModel(object):
         feed_dict = {}
         for i in range(config.lstm_layers_num):
             feed_dict.update(self._cell[i].gen_masks(session))
+        if config.drop_embed_var:
+            feed_dict.update(self.gen_emb_mask(session))
         if self._config.mos:
             feed_dict.update({self._mos_mask: session.run(self._gen_mos_mask)})
         return feed_dict
@@ -417,18 +436,18 @@ class PTBInput(object):
 
 
 class SGDOptimizer(object):
-    def __init__(self, model, grads, tvars):
+    def __init__(self, model, grads, tvars, use_opt=True):
 
-        self._updates = list()
-        for g in grads:
-            self._updates.append(model.lr * g)
-        optimizer = tf.train.GradientDescentOptimizer(1.0)
+        self._updates = grads[:]
+        optimizer = tf.train.GradientDescentOptimizer(model.config.lr)
 
         if config.max_update_norm > 0:
             self._updates, _ = tf.clip_by_global_norm(self._updates, config.max_update_norm)
-
-        self._train_op = optimizer.apply_gradients(
-            zip(self._updates, tvars), global_step=model.global_step)
+        if use_opt:
+            self._train_op = optimizer.apply_gradients(
+                zip(self._updates, tvars), global_step=model.global_step)
+        else:
+            self._train_op = None
 
     @property
     def train_op(self):
@@ -444,7 +463,7 @@ class MASGDOptimizer(object):
     count = 0
 
     def __init__(self, model, grads, tvars, decay=0.9999):
-        optimizer = tf.train.GradientDescentOptimizer(1.0)
+        optimizer = tf.train.GradientDescentOptimizer(model.lr)
 
         self._model = model
         self._updates = grads
@@ -499,7 +518,7 @@ class ASGDOptimizer(object):
 
     def __init__(self, model, grads, tvars):
 
-        optimizer = tf.train.GradientDescentOptimizer(1.0)
+        optimizer = tf.train.GradientDescentOptimizer(model.lr)
 
         self._model = model
         self._updates = grads
@@ -554,7 +573,7 @@ class ASGDOptimizer(object):
 
             return op
 
-        with tf. control_dependencies([update_op]):
+        with tf.control_dependencies([update_op]):
             with tf.name_scope("trigger_mux"):
                 self._train_op.append(tf.cond(self._trigger, lambda: trigger_on(), lambda: trigger_off()))
 
@@ -589,7 +608,7 @@ class ASGDOptimizer(object):
 
 
 class RMSpropOptimizer(object):
-    def __init__(self, model, grads, tvars, decay=0.9): #TODO:replace with 0.9
+    def __init__(self, model, grads, tvars, decay=0.9, use_opt=True): #TODO:replace with 0.9
         self._decay = decay
         self._config = model.config
         self._eps = model.config.opt_eps
@@ -603,7 +622,7 @@ class RMSpropOptimizer(object):
         self._ms_accu_op = []
         for tvar, g in zip(tvars, grads):
             self._ms.append(tf.get_variable(g.op.name + "_ms",
-                                                     initializer=tf.ones_like(tvar, dtype=tf.float32) / 100,
+                                                     initializer=tf.ones_like(tvar, dtype=tf.float32) / 50,
                                                      trainable=False))
 
             g = tf.convert_to_tensor(g)
@@ -622,7 +641,7 @@ class RMSpropOptimizer(object):
         # compute updates
         with tf.control_dependencies(self._ms_accu_op):
             for grad, ms in zip(grads, self._ms):
-                self._updates.append(tf.multiply(self._lr,self.update(grad, ms)))
+                self._updates.append(self.update(grad, ms))
 
         # clip updates
         if self._max_update_norm > 0:
@@ -630,9 +649,13 @@ class RMSpropOptimizer(object):
             self._updates, _ = tf.clip_by_global_norm(self._updates, self._max_update_norm)
 
         # apply updates op
-
-        for i, tvar in enumerate(tvars):
-            self._train_op.append(tf.assign_add(tvar, -self._updates[i]))
+        if use_opt:
+            for i, tvar in enumerate(tvars):
+                delta = tf.multiply(-self._lr, self._updates[i])
+                self._train_op.append(tf.assign_add(tvar, delta))
+            # self._train_op.extend(self._ms_accu_op)
+        else:
+            self._train_op = None
 
 
     def update(self, grad, ms):
@@ -736,6 +759,11 @@ def run_epoch(session, model, eval_op=None, verbose=True):
     if eval_op is not None:
         model.input.shuffle()
 
+        if args.collect_stat:
+            min_update = 1e20
+            max_update = 0
+            mean_update = 0
+
     start_time = time.time()
     losses = 0.0
     iters = 0
@@ -748,7 +776,8 @@ def run_epoch(session, model, eval_op=None, verbose=True):
     if config.variational == 'epoch' and eval_op is not None:
         # generate masks for epoch
         feed_dict_masks = model.gen_masks(session)
-        feed_dict_masks.update(model.gen_emb_mask(session))
+        if config.drop_i < 1.0:
+            feed_dict_masks.update(model.gen_emb_mask(session))
         # randomize words to drop from the vocabulary
         if config.drop_i < 1.0:
             words2drop = list()
@@ -769,7 +798,8 @@ def run_epoch(session, model, eval_op=None, verbose=True):
     # perform train op if training
     if eval_op is not None:
         fetches["eval_op"] = eval_op
-
+        if args.collect_stat:
+            fetches["stat"] = model.stat_ops
     for step in range(model.input.epoch_size):
         # if variational every batch --> update masks
         if config.variational == 'batch' and eval_op is not None:
@@ -794,6 +824,8 @@ def run_epoch(session, model, eval_op=None, verbose=True):
                             dropped.append(w)
                             feed_dict[model.emb_mask][i, j, :] = 0
 
+
+
         vals = session.run(fetches, feed_dict)
 
         loss = vals["loss"]
@@ -802,6 +834,11 @@ def run_epoch(session, model, eval_op=None, verbose=True):
         losses += loss
         iters += model.input.time_steps
 
+        if args.collect_stat and eval_op is not None:
+            stat = vals["stat"][0]
+            min_update = np.minimum(min_update, stat)
+            max_update = np.maximum(max_update, stat)
+            mean_update += stat
 
         if verbose and step % (model.input.epoch_size // 10) == 10:
             logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
@@ -811,6 +848,9 @@ def run_epoch(session, model, eval_op=None, verbose=True):
     if eval_op is not None and config.drop_i < 1.0:
         logger.info("dropped %d/%d words" % (len(dropped), model.input.data_len))
 
+    if args.collect_stat and eval_op is not None:
+        logger.info("mean update: %2.2f, min update: %2.2f, max update: %2.2f" %
+                    (mean_update /iters * model.input.time_steps, min_update, max_update))
     return np.exp(losses / iters)
 
 
@@ -970,6 +1010,8 @@ def get_config(config_name):
         return config_pool.SmallConfig()
     if config_name == "mos":
         return config_pool.MosConfig()
+    if config_name == "mos_gl":
+        return config_pool.MosGLConfig()
     if config_name == "best":
         return config_pool.BestConfig()
     else:
@@ -1260,8 +1302,10 @@ if __name__ == "__main__":
     ap.add_argument("--GL",                 dest='GL', action='store_false')
     ap.add_argument('--verbose',            dest='verbose', action='store_true')
     ap.add_argument('--save',               dest='save', action='store_true')
+    ap.add_argument('--collect_stat',       dest='collect_stat', action='store_true')
     ap.add_argument('--drop_embed_var',     dest='drop_embed_var', action='store_true')
 
+    ap.set_defaults(collect_stat=None)
     ap.set_defaults(mos=None)
     ap.set_defaults(no_eval=None)
     ap.set_defaults(drop_embed_var=None)
