@@ -48,31 +48,45 @@ class PTBModel(object):
                 self._epoch_inc = tf.assign(self._epoch_count, tf.add(self._epoch_count, tf.constant(1)))
                 self._epoch_reset = tf.assign(self._epoch_count, tf.constant(0))
 
-
         # construct the embedding layer on cpu device
         with tf.variable_scope("embedding"), tf.device(self._cpu_device):
             # the embedding matrix is allocated in the cpu to save valuable gpu memory for the model.
+            if is_training:
+                logger.info("adding embedding matrix with dims [{:d}, {:d}]".format(vocab_size, config.embedding_size))
             embedding_map = tf.get_variable(
-                name="embedding", shape=[vocab_size, config.embedding_size], dtype=tf.float32)
-            b_embed_in = tf.get_variable(name="b_embed_in", shape=[config.embedding_size], dtype=tf.float32)
-            embedding = tf.nn.embedding_lookup(embedding_map, self._input.input_data) + b_embed_in
+                name="embedding", dtype=tf.float32,
+                initializer=tf.random_uniform(shape=[vocab_size, config.embedding_size],
+                                              minval=-0.1, maxval=0.1,seed=seed, dtype=tf.float32))
+
+            if is_training:
+                logger.info("adding embedding bias with dims [{:d}]".format(config.embedding_size))
+            # b_embed_in = tf.get_variable(name="b_embed_in",
+            #                              initializer=tf.zeros([config.embedding_size], dtype=tf.float32),
+            #                              dtype=tf.float32)
+            embedding = tf.nn.embedding_lookup(embedding_map, self._input.input_data) # + b_embed_in
 
             if is_training and (config.keep_prob_embed < 1 or config.drop_i < 1):
                 # non variational wrapper for the embedding
-
+                logger.info("adding embedding mask with dims [{:d}, {:d}, {:d}]".format(config.batch_size, config.time_steps, config.embedding_size))
                 self._emb_mask = tf.placeholder(dtype=tf.float32, shape=[config.batch_size, config.time_steps, config.embedding_size],
                                                    name="embedding_mask")
-                if config.drop_embed_var:
-                    with tf.name_scope("out_mask_gen"):
-                        random_tensor = ops.convert_to_tensor(config.keep_prob_embed)
-                        random_tensor += random_ops.random_uniform([config.batch_size, 1, config.embedding_size])
-                        random_tensor = tf.tile(random_tensor, [1, config.time_steps, 1])
-                        self._gen_emb_mask = math_ops.floor(random_tensor)
+                if config.keep_prob_embed < 1:
+                    if config.drop_embed_var:
+                        logger.info("using variational embedding dropout")
+                        with tf.name_scope("out_mask_gen"):
+                            random_tensor = ops.convert_to_tensor(config.keep_prob_embed)
+                            random_tensor += random_ops.random_uniform([config.batch_size, 1, config.embedding_size], seed=seed)
+                            random_tensor = tf.tile(random_tensor, [1, config.time_steps, 1])
+                            self._gen_emb_mask = math_ops.floor(random_tensor)
+                    else:
+                        logger.info("using naive embedding dropout")
+                        with tf.name_scope("out_mask_gen"):
+                            random_tensor = ops.convert_to_tensor(config.keep_prob_embed)
+                            random_tensor += random_ops.random_uniform([config.batch_size, config.time_steps, config.embedding_size], seed=seed)
+                            self._gen_emb_mask = math_ops.floor(random_tensor)
                 else:
                     with tf.name_scope("out_mask_gen"):
-                        random_tensor = ops.convert_to_tensor(config.keep_prob_embed)
-                        random_tensor += random_ops.random_uniform([config.batch_size, config.time_steps, config.embedding_size])
-                        self._gen_emb_mask = math_ops.floor(random_tensor)
+                        self._gen_emb_mask = tf.ones([config.batch_size, config.time_steps, config.embedding_size])
 
                 embedding_out = math_ops.div(embedding, config.drop_i*config.keep_prob_embed) * self._emb_mask
 
@@ -94,7 +108,7 @@ class PTBModel(object):
         if is_training:
             # set learning rate as variable in order to anneal it throughout training
             with tf.name_scope("learning_rate"):
-                self._lr = tf.Variable(config.lr, trainable=False)
+                self._lr = tf.Variable(config.lr, trainable=False, dtype=tf.float32)
                 # a placeholder to assign a new learning rate
                 self._new_lr = tf.placeholder(
                     tf.float32, shape=[], name="new_learning_rate")
@@ -109,24 +123,30 @@ class PTBModel(object):
             with tf.name_scope("optimizer"):
                 self._optimizer = []
                 if config.opt == "sgd":
+                    logger.info("using SGD optimizer")
                     self._optimizer = SGDOptimizer(self, grads, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "asgd":
+                    logger.info("using ASGD optimizer")
                     opt = SGDOptimizer(self, grads, tvars, use_opt=False)
                     self._optimizer = ASGDOptimizer(self, opt.updates, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "masgd":
+                    logger.info("using MASGD optimizer")
                     opt = SGDOptimizer(self, grads, tvars, use_opt=False)
                     self._optimizer = MASGDOptimizer(self, opt.updates, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "rms":
+                    logger.info("using RMS optimizer")
                     self._optimizer = RMSpropOptimizer(self, grads, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "arms":
+                    logger.info("using ARMS optimizer")
                     opt = RMSpropOptimizer(self, grads, tvars, use_opt=False)
                     self._optimizer = ASGDOptimizer(self, opt.updates, tvars)
                     self._train_op = self._optimizer.train_op
                 elif config.opt == "marms":
+                    logger.info("using MARMS optimizer")
                     opt = RMSpropOptimizer(self, grads, tvars, use_opt=False)
                     self._optimizer = MASGDOptimizer(self, opt.updates, tvars)
                     self._train_op = self._optimizer.train_op
@@ -153,28 +173,42 @@ class PTBModel(object):
         # define basic lstm cell
         def lstm_cell(lstm_size):
             if config.DC:
+                if is_training:
+                    logger.info("using weight-dropped LSTM cell")
                 return dr.WeightDroppedLSTMCell(num_units=lstm_size,
                                                 is_training=is_training,
                                                 state_is_tuple=True)
             else:
+                if is_training:
+                    logger.info("using LSTM cell")
                 return tf.nn.rnn_cell.BasicLSTMCell(num_units=lstm_size,
                                                     forget_bias=config.forget_bias_init,
                                                     state_is_tuple=True)
 
         possible_cell = lstm_cell
         # if dropout is needed add a dropout wrapper
-        if is_training and config.drop_output is not None:
+        if is_training and (config.drop_output[0] != 0 or config.drop_output[1] != 0 or
+                            config.drop_state[0] != 0 or config.drop_state[1] != 0):
+
             def possible_cell(lstm_size):
                 if config.variational is not None:
                     if config.DC:
+                        if is_training:
+                            logger.info("using weight-dropped variational dropout")
                         return dr.WeightDroppedVariationalDropoutWrapper(lstm_cell(lstm_size),
                                                                          batch_size,
                                                                          lstm_size)
                     else:
+                        if is_training:
+                            logger.info("using variational dropout")
                         return dr.VariationalDropoutWrapper(lstm_cell(lstm_size),
                                                             batch_size,
                                                             lstm_size)
                 else:
+                    if config.DC:
+                        raise ValueError("DC is used with variational dropout")
+                    if is_training:
+                        logger.info("using naive dropout")
                     return tf.nn.rnn_cell.DropoutWrapper(lstm_cell(lstm_size),
                                                          output_keep_prob=config.drop_output)
 
@@ -188,6 +222,8 @@ class PTBModel(object):
             outputs.append([])
             state.append([])
 
+        if is_training:
+            logger.info("adding LSTM layer #1")
         # unroll the cell to "time_steps" times
         with tf.variable_scope("lstm%d" % 1):
             lstm_size = units_num[0]
@@ -203,6 +239,8 @@ class PTBModel(object):
 
         # rest of layers
         for i in range(1, config.lstm_layers_num):
+            if is_training:
+                logger.info("adding LSTM layer #{:d}".format(i+1))
             with tf.variable_scope("lstm%d" % (i + 1)):
                 lstm_size = units_num[i]
                 cell.append(possible_cell(lstm_size))
@@ -228,60 +266,80 @@ class PTBModel(object):
                 logger.info("untied embedding")
             w_out = tf.get_variable(name="w_embed_out", shape=[config.units_num[-1],vocab_size], dtype=tf.float32)
 
+        b_out = tf.get_variable(name="b_out",
+                                dtype=tf.float32,initializer=tf.zeros([config.vocab_size], dtype=tf.float32))
+
         with tf.name_scope("loss"):
             with tf.name_scope("data_loss"):
                 if config.mos:
-                    logger.info("using mos with %d contexts" % config.mos_context_num)
+                    if is_training:
+                        logger.info("adding mos with %d contexts" % config.mos_context_num)
                     with tf.name_scope("mos"):
-
-                        self._mos_mask = tf.placeholder(dtype=tf.float32,
-                                                        shape=[config.batch_size*config.time_steps*config.mos_context_num, config.embedding_size],
-                                                        name="mos_mask")
-                        with tf.name_scope("mos_mask_gen"):
-                            random_tensor = ops.convert_to_tensor(config.mos_drop)
-                            random_tensor += random_ops.random_uniform([config.batch_size*config.mos_context_num, config.embedding_size])
-                            random_tensor = tf.tile(random_tensor, [config.time_steps, 1])
-                            self._gen_mos_mask = math_ops.floor(random_tensor)
-
                         # pi
-                        prior = tf.get_variable(name="pi",
+                        prior = tf.get_variable(name="mos_pi",
                                                 shape=[config.units_num[-1], config.mos_context_num],
                                                 dtype=tf.float32)
                         prior = tf.matmul(lstm_output[-1], prior)
-                        pi = tf.nn.softmax(prior, name="prior")
+                        pi = tf.nn.softmax(prior, name="mos_prior")
+
+
                         # context vectors
-                        w_h = tf.get_variable(name="w_h",
+                        w_h = tf.get_variable(name="mos_w_h",
                                               shape=[config.units_num[-1], config.mos_context_num*config.embedding_size],
                                               dtype=tf.float32)
-                        b_h = tf.get_variable(name="b_h",
+                        b_h = tf.get_variable(name="mos_b_h",
                                               shape=[config.mos_context_num * config.embedding_size],
                                               dtype=tf.float32)
-                        h = tf.reshape(tf.tanh(tf.matmul(lstm_output[-1], w_h) + b_h),[-1, config.embedding_size])
-                        if is_training and config.mos_drop < 1.0:
+
+                        h = tf.reshape(tf.tanh(tf.matmul(lstm_output[-1], w_h) + b_h), [-1, config.embedding_size])
+
+                        if is_training:
+                            self._mos_mask = tf.placeholder(dtype=tf.float32,
+                                                            shape=[config.batch_size*config.time_steps*config.mos_context_num, config.embedding_size],
+                                                            name="mos_mask")
+                            if config.variational is not None:
+                                with tf.name_scope("mos_mask_gen"):
+                                    random_tensor = ops.convert_to_tensor(config.mos_drop)
+                                    random_tensor += random_ops.random_uniform([config.batch_size, 1, config.mos_context_num*config.embedding_size], seed=seed)
+                                    random_tensor = tf.tile(random_tensor, [1, config.time_steps, 1])
+                                    self._gen_mos_mask = tf.reshape(math_ops.floor(random_tensor),
+                                                                    [config.batch_size*config.time_steps*config.mos_context_num, config.embedding_size])
+                            else:
+                                with tf.name_scope("mos_mask_gen"):
+                                    random_tensor = ops.convert_to_tensor(config.mos_drop)
+                                    random_tensor += random_ops.random_uniform(
+                                        [config.batch_size*config.mos_context_num*config.time_steps, config.embedding_size], seed=seed)
+                                    self._gen_mos_mask = math_ops.floor(random_tensor)
+
                             h = math_ops.div(h, config.mos_drop) * self._mos_mask
-                        a = tf.reshape(tf.matmul(h, w_out),[-1, config.vocab_size])
+
+                        a = tf.reshape(tf.matmul(h, w_out) + b_out, [-1, config.vocab_size])
                         # mos
                         a_mos = tf.reshape(tf.nn.softmax(a), [-1, config.mos_context_num, config.vocab_size])
                         pi = tf.reshape(pi, [-1, config.mos_context_num, 1])
-                        pi_exp = tf.tile(pi, [1, 1, config.vocab_size])
-                        weighted_softmax = tf.multiply(a_mos, pi_exp)
+                        pi_expanded = tf.tile(pi, [1, 1, config.vocab_size])
+                        weighted_softmax = tf.multiply(a_mos, pi_expanded)
                         softmax = tf.reduce_sum(weighted_softmax, axis=1)
                         # loss
-                        indices = tf.transpose(tf.stack([tf.range(0, softmax.shape.as_list()[0], dtype=tf.int32), tf.reshape(targets, [-1])]))
+                        indices = tf.transpose(tf.stack([tf.range(0, softmax.shape.as_list()[0], dtype=tf.int32),
+                                                        tf.reshape(targets, [-1])]))
                         loss_arg_clipped = tf.gather_nd(softmax, indices)
-                        eps = 1e-8
-                        loss_arg_clipped += eps
+                        loss_arg_clipped += 1e-8
                         losses = -tf.log(loss_arg_clipped)
 
-                    loss = tf.reduce_sum(losses) / batch_size
+                    loss = tf.reduce_mean(losses)
                 else:
+                    if is_training:
+                        logger.info("adding softmax layer")
                     logits = tf.matmul(lstm_output[-1], w_out)
                     softmax = tf.nn.softmax(logits)
                     losses = tf.contrib.legacy_seq2seq.sequence_loss_by_example([logits],
                                                                                 [tf.reshape(targets, [-1])],
                                                                                 [tf.ones([batch_size * time_steps],
                                                                                          dtype=tf.float32)])
-                    loss = tf.reduce_sum(losses) / batch_size
+                    loss = tf.reduce_mean(losses)
+
+            raw_loss = loss
 
             if config.AR and is_training:
                 logger.info("using activation regularization")
@@ -306,13 +364,9 @@ class PTBModel(object):
         with tf.name_scope("compute_grads"):
             grads = tf.gradients(loss, tf.trainable_variables())
 
-            if args.collect_stat:
-                self._stat_ops.append(tf.add_n([tf.square(tf.norm(g)) for g in grads]))
-
-
         final_state = state
 
-        return loss, grads, cell, initial_state, final_state, softmax
+        return raw_loss, grads, cell, initial_state, final_state, softmax
 
     @property
     def initial_state(self):
@@ -388,6 +442,12 @@ class PTBModel(object):
     def gen_emb_mask(self, session):
         return {self._emb_mask: session.run(self._gen_emb_mask)}
 
+    def gen_wdrop_mask(self, session):
+        masks = {}
+        for cell in self._cell:
+            masks.update(cell.cell.gen_masks(session))
+        return masks
+
     def update_drop_params(self, session, output_keep_prob, state_keep_prob):
         for i in range(config.lstm_layers_num):
             if i < config.lstm_layers_num -1:
@@ -433,13 +493,19 @@ class PTBInput(object):
     def get_batch(self, idx):
         return {self.input_data: self.data[:, idx:idx+self.time_steps],
                     self.targets: self.label[:, idx:idx + self.time_steps]}
-
-
+###################################### ADD TO RMS OPTIMIZER ##############################################
+############################################################################################################
+#######             if args.collect_stat:                                                           ########
+#######                 self._stat_ops.append(tf.add_n([tf.square(tf.norm(g)) for g in grads]))     ########
+############################################################################################################
 class SGDOptimizer(object):
     def __init__(self, model, grads, tvars, use_opt=True):
 
+        if args.collect_stat:
+            model.stat_ops.append(tf.add_n([tf.square(tf.norm(g)) for g in grads]))
+
         self._updates = grads[:]
-        optimizer = tf.train.GradientDescentOptimizer(model.config.lr)
+        optimizer = tf.train.GradientDescentOptimizer(model.lr)
 
         if config.max_update_norm > 0:
             self._updates, _ = tf.clip_by_global_norm(self._updates, config.max_update_norm)
@@ -463,13 +529,23 @@ class MASGDOptimizer(object):
     count = 0
 
     def __init__(self, model, grads, tvars, decay=0.9999):
+
         optimizer = tf.train.GradientDescentOptimizer(model.lr)
 
         self._model = model
         self._updates = grads
 
+        with tf.name_scope("trigger"):
+            self._trigger = tf.get_variable("ASGD_trigger%d" % type(self).count, initializer=tf.constant(False, dtype=tf.bool), trainable=False)
+            self._set_trigger = tf.assign(self._trigger, True)
+
+            self._T = tf.get_variable("T%d" % type(self).count, initializer=tf.constant(0, dtype=tf.int32), trainable=False)
+            self._new_T = tf.placeholder(tf.int32, shape=[], name="new_T%d" % type(self).count)
+            self._set_T = tf.assign(self._T, self._new_T)
+
         self._train_op = list()
-        self._train_op.append(optimizer.apply_gradients(zip(grads, tvars), global_step=model.global_step))
+        update_op = optimizer.apply_gradients(zip(grads, tvars), global_step=model.global_step)
+        self._train_op.append(update_op)
 
         self._save_vars = []
         self._load_vars = []
@@ -477,9 +553,10 @@ class MASGDOptimizer(object):
         self._final_assign_op = []
         for var in tvars:
             self._final_vars.append(tf.get_variable(var.op.name + "final%d" % type(self).count,
-                                                    initializer=tf.zeros_like(var, dtype=tf.float32), trainable=False))
+                                                    initializer=tf.zeros_like(var, dtype=tf.float32), trainable=False)
+                                    )
             with tf.name_scope("final_average"):
-                cur_epoch_num = (tf.cast((model.epoch + 1) * model.input.epoch_size, dtype=tf.float32))
+                cur_epoch_num = tf.cast((model.epoch - self._T + 1) * model.input.epoch_size, dtype=tf.float32)
                 self._final_assign_op.append(tf.assign(var, self._final_vars[-1] *
                                                        (1 - decay) / (1 - decay ** cur_epoch_num)))
 
@@ -489,15 +566,50 @@ class MASGDOptimizer(object):
                 self._save_vars.append(tf.assign(tmp_var, var))
                 self._load_vars.append(tf.assign(var, tmp_var))
 
-        with tf.control_dependencies(self._train_op):
-            for i, var in enumerate(tvars):
-                self._train_op.append(tf.assign(self._final_vars[i], decay * self._final_vars[i] + var))
+        def trigger_on():
+            with tf.name_scope("trigger_is_on"):
+                op = list()
+                op.append(tf.identity(self._trigger))
+                op.append(tf.identity(self._T))
+                for i, var in enumerate(tvars):
+                    op.append(tf.assign(self._final_vars[i], decay * self._final_vars[i] + var))
+
+            return op
+
+        def trigger_off():
+            with tf.name_scope("trigger_is_off"):
+                op = list()
+                op.append(tf.identity(self._trigger))
+                op.append(tf.identity(self._T))
+                for i, var in enumerate(tvars):
+                    op.append(tf.identity(self._final_vars[i]))
+
+            return op
+
+        with tf.control_dependencies([update_op]):
+            with tf.name_scope("trigger_mux"):
+                self._train_op.append(tf.cond(self._trigger, lambda: trigger_on(), lambda: trigger_off()))
+
 
         type(self).count += 1
+
+    def set_trigger(self, session):
+        return session.run(self._set_trigger)
 
     @property
     def train_op(self):
         return self._train_op
+
+    @property
+    def trigger(self):
+        return self._trigger
+
+    @property
+    def T(self):
+        return self._T
+
+    def set_T(self, session, T):
+        return session.run(self._set_T, feed_dict={self._new_T: T})
 
     @property
     def final_assign_op(self):
@@ -591,6 +703,10 @@ class ASGDOptimizer(object):
     def trigger(self):
         return self._trigger
 
+    @property
+    def T(self):
+        return self._T
+
     def set_T(self, session, T):
         return session.run(self._set_T, feed_dict={self._new_T: T})
 
@@ -613,7 +729,7 @@ class RMSpropOptimizer(object):
         self._config = model.config
         self._eps = model.config.opt_eps
         self._max_update_norm = model.config.max_update_norm
-        self._lr = model.config.lr
+        self._lr = model.lr
 
         self._grads = grads
         self._tvars = tvars
@@ -756,6 +872,8 @@ def tvars_num():
 
 def run_epoch(session, model, eval_op=None, verbose=True):
     """run the given model over its data"""
+    start_time = time.time()
+
     if eval_op is not None:
         model.input.shuffle()
 
@@ -764,30 +882,36 @@ def run_epoch(session, model, eval_op=None, verbose=True):
             max_update = 0
             mean_update = 0
 
-    start_time = time.time()
     losses = 0.0
     iters = 0
 
-    # zeros initial state for all devices
+    # zeros initial state
     state = session.run(model.initial_state)
 
     feed_dict_masks = {}
     # if variational every epoch --> update masks
-    if config.variational == 'epoch' and eval_op is not None:
-        # generate masks for epoch
+    if config.variational is not None and eval_op is not None:
+        # generate masks for LSTM and mos if exists
         feed_dict_masks = model.gen_masks(session)
-        if config.drop_i < 1.0:
+
+        # generate mask for weight-dropped LSTM
+        if config.DC:
+            feed_dict_masks.update(model.gen_wdrop_mask(session))
+
+        # generate mask for embedding
+        if config.drop_i < 1.0 or config.keep_prob_embed < 1.0:
             feed_dict_masks.update(model.gen_emb_mask(session))
-        # randomize words to drop from the vocabulary
-        if config.drop_i < 1.0:
-            words2drop = list()
-            for i in range(config.batch_size):
-                rand = np.random.rand(config.vocab_size)
-                bin_vec = np.zeros(config.vocab_size, dtype=np.int32)
-                bin_vec[rand > config.drop_i] = 1
-                drop = np.where(bin_vec == 1)
-                words2drop.append(drop[0])
-            dropped = list()
+
+            # randomize words to drop from the vocabulary
+            if config.drop_i < 1.0:
+                words2drop = list()
+                for i in range(config.batch_size):
+                    rand = np.random.rand(config.vocab_size)
+                    bin_vec = np.zeros(config.vocab_size, dtype=np.int32)
+                    bin_vec[rand > config.drop_i] = 1
+                    drop = np.where(bin_vec == 1)
+                    words2drop.append(drop[0])
+                dropped = list()
 
     # evaluate loss and final state for all devices
     fetches = {
@@ -800,11 +924,8 @@ def run_epoch(session, model, eval_op=None, verbose=True):
         fetches["eval_op"] = eval_op
         if args.collect_stat:
             fetches["stat"] = model.stat_ops
-    for step in range(model.input.epoch_size):
-        # if variational every batch --> update masks
-        if config.variational == 'batch' and eval_op is not None:
-            feed_dict_masks = model.gen_masks(session)
 
+    for step in range(model.input.epoch_size):
         # pass states between time batches
         feed_dict = dict(feed_dict_masks.items())
         for j, (c, h) in enumerate(model.initial_state):
@@ -813,17 +934,12 @@ def run_epoch(session, model, eval_op=None, verbose=True):
 
         feed_dict.update(model.input.get_batch(step*model.input.time_steps))
 
-        if eval_op is not None:
-            if not config.drop_embed_var:
-                feed_dict.update(model.gen_emb_mask(session))
-
-            if config.drop_i < 1.0:
+        if eval_op is not None and config.drop_i < 1.0:
                 for i, batch in enumerate(feed_dict[model.input.input_data]):
                     for j, w in enumerate(batch):
                         if w in words2drop[i]:
                             dropped.append(w)
                             feed_dict[model.emb_mask][i, j, :] = 0
-
 
 
         vals = session.run(fetches, feed_dict)
@@ -832,7 +948,7 @@ def run_epoch(session, model, eval_op=None, verbose=True):
         state = vals["final_state"]
 
         losses += loss
-        iters += model.input.time_steps
+        iters += 1
 
         if args.collect_stat and eval_op is not None:
             stat = vals["stat"][0]
@@ -843,14 +959,42 @@ def run_epoch(session, model, eval_op=None, verbose=True):
         if verbose and step % (model.input.epoch_size // 10) == 10:
             logger.info("%.3f perplexity: %.3f bits: %.3f speed: %.0f wps" %
                   (step * 1.0 / model.input.epoch_size, np.exp(losses / iters), np.log2(np.exp(losses / iters)),
-                   iters * model.input.batch_size / (time.time() - start_time)))
+                   iters * model.input.batch_size * model.input.time_steps / (time.time() - start_time)))
+
+        if eval_op is not None:
+            if config.variational == 'epoch' and config.drop_embed_var is None:
+                if config.drop_embed_var is None:
+                    feed_dict_masks.update(model.gen_emb_mask(session))
+
+            # if variational every batch --> update masks
+            if config.variational == 'batch':
+                # generate masks for LSTM and mos if exists
+                feed_dict_masks.update(model.gen_masks(session))
+
+                # generate mask for embedding
+                if config.drop_i < 1.0 or config.keep_prob_embed < 1.0:
+                    feed_dict_masks.update(model.gen_emb_mask(session))
+
+                    # randomize words to drop from the vocabulary
+                    if config.drop_i < 1.0:
+                        words2drop = list()
+                        for i in range(config.batch_size):
+                            rand = np.random.rand(config.vocab_size)
+                            bin_vec = np.zeros(config.vocab_size, dtype=np.int32)
+                            bin_vec[rand > config.drop_i] = 1
+                            drop = np.where(bin_vec == 1)
+                            words2drop.append(drop[0])
+
+            # generate mask for weight-dropped LSTM
+            if config.DC:
+                feed_dict_masks.update(model.gen_wdrop_mask(session))
 
     if eval_op is not None and config.drop_i < 1.0:
         logger.info("dropped %d/%d words" % (len(dropped), model.input.data_len))
 
     if args.collect_stat and eval_op is not None:
         logger.info("mean update: %2.2f, min update: %2.2f, max update: %2.2f" %
-                    (mean_update /iters * model.input.time_steps, min_update, max_update))
+                    (mean_update /iters , min_update, max_update))
     return np.exp(losses / iters)
 
 
@@ -860,13 +1004,13 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
     global bestVal
 
     def stop_criteria(epoch):
-        stop_window = 5
+        stop_window = 10
         if epoch == epochs_num - 1:
             return True
 
         if len(valid_perplexity) > stop_window:
-            diff = [valid_perplexity[k] - valid_perplexity[k+1] for k in range(-stop_window, -1,  1)]
-            if np.max(diff) < 0:
+
+            if np.min(valid_perplexity[:-stop_window]) < valid_perplexity[-1]:
                 return True
             else:
                 return False
@@ -888,7 +1032,7 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
 
 
     if config.opt == "asgd" or config.opt == "arms":
-        validation_tolerance = 5
+        nonmono = 5
 
     if config.opt == "masgd" or config.opt == "marms":
         lr_decay = 1.0
@@ -904,9 +1048,8 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
             lr_sum = tf.Summary(value=[tf.Summary.Value(tag="learning_rate_track" + str(layer),
                                                        simple_value=current_lr)])
             train_writer.add_summary(lr_sum, i + 1)
-            if config.opt == "asgd" or config.opt == "arms" and not session.run(m.optimizer.trigger):
-                validation_tolerance -= 1
-                if validation_tolerance == 0:
+            if (config.opt == "asgd" or config.opt == "arms") and not session.run(m.optimizer.trigger):
+                if len(valid_perplexity) > nonmono and np.min(valid_perplexity[:-nonmono]) < valid_perplexity[-1]:
                     logger.info("setting trigger and T")
                     m.optimizer.set_trigger(session)
                     m.optimizer.set_T(session, i)
@@ -915,7 +1058,7 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
         logger.info("Epoch: %d Learning rate: %.3f Max Update Norm: %.3f" % (i + 1, session.run(m.lr), config.max_update_norm))
 
         if config.opt == "asgd" or config.opt == "arms":
-            logger.info("Trigger is %s" % bool(session.run(m.optimizer.trigger)))
+            logger.info("Trigger is %s, T=%d" % (bool(session.run(m.optimizer.trigger)), session.run(m.optimizer.T)))
 
         ###################################### train ######################################
         train_perplexity = run_epoch(session, m, eval_op=m.train_op, verbose=True)
@@ -925,7 +1068,7 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
         logger.info("Epoch: %d Train Perplexity: %.3f Bits: %.3f " % (i + 1, train_perplexity, np.log2(train_perplexity)))
 
         if ((config.opt == "asgd" or config.opt == "arms") and session.run(m.optimizer.trigger)) \
-                or config.opt == "marms" or config.opt == "masgd":
+                or (config.opt == "marms" or config.opt == "masgd"):
             logger.info("saving model weights....")
             session.run(m.optimizer.save_vars)
             logger.info("setting averaged weights....")
@@ -949,7 +1092,7 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
                 except:
                     pass
 
-        if config.opt == "asgd" or config.opt == "arms" and not session.run(m.optimizer.trigger):
+        if (config.opt == "asgd" or config.opt == "arms") and not session.run(m.optimizer.trigger):
             should_stop = False if i != epochs_num - 1 else True
         else:
             should_stop = stop_criteria(i)
@@ -1052,19 +1195,19 @@ def get_vars2restore(layer, units_num):
     else:
         vars2load = []
         for var in tf.trainable_variables():
-            print(var.op.name)
+            # print(var.op.name)
             if var.op.name == "Model/w_embed_out":
                  if units_num[layer] == units_num[layer-1]:
-                     print("added")
+                     # print("added")
                      vars2load.append(var)
-            else:
+            if "lstm" in var.op.name:
                 lstm_idx = re.findall("lstm([0-9])+", var.op.name)
-                if len(lstm_idx) == 0:
-                    print("added")
+                if int(lstm_idx[0]) <= layer:
                     vars2load.append(var)
-                elif int(lstm_idx[0]) <= layer:
-                    vars2load.append(var)
-                    print("added")
+                    # print("added")
+            if "mos" in var.op.name and units_num[layer] == units_num[layer-1]:
+                # print("added")
+                vars2load.append(var)
 
         return vars2load
 
@@ -1127,9 +1270,11 @@ def main():
 
         ###################################### build graph ######################################
         with tf.Graph().as_default() as graph:
-            initializer = tf.random_uniform_initializer(-config.init_scale,
-                                                        config.init_scale)
             tf.set_random_seed(seed)
+            np.random.seed(seed)
+
+            initializer = tf.random_uniform_initializer(-config.init_scale,
+                                                        config.init_scale, seed=seed)
 
             with tf.name_scope("Train"):
                 logger.info("building model with dimensions %d->%d->%s->%d" %
@@ -1156,7 +1301,7 @@ def main():
             if vars2load is not None and GL:
                 restore_saver = tf.train.Saver(var_list=vars2load)
 
-            config.tvars_num = '%2.2fM' %(tvars_num()*1e-6)
+            config.tvars_num = '%2.4fM' %(tvars_num()*1e-6)
             print_tvars()
 
         sess_config = tf.ConfigProto(device_count={"CPU": 2},
@@ -1206,8 +1351,7 @@ def main():
 
             ###################################### build graph ######################################
             with tf.Graph().as_default() as graph:
-                tf.set_random_seed(seed)
-                np.random.seed(seed)
+
                 initializer = tf.random_uniform_initializer(-config.init_scale,
                                                             config.init_scale, seed=seed)
 
@@ -1297,9 +1441,11 @@ if __name__ == "__main__":
     ap.add_argument("--drop_i",             type=float, default=None, help="drop words")
     ap.add_argument("--mos_drop",           type=float, default=None, help="drop mos")
     ap.add_argument("--mos_context_num",    type=int, default=None, help="#of experts")
+    ap.add_argument("--wdecay",           type=float, default=None, help="weight decay")
     ap.add_argument("--mos",                dest='mos', action='store_true')
     ap.add_argument("--no_eval",            dest='no_eval', action='store_true')
     ap.add_argument("--GL",                 dest='GL', action='store_false')
+    ap.add_argument("--DC",                 dest='DC', action='store_true')
     ap.add_argument('--verbose',            dest='verbose', action='store_true')
     ap.add_argument('--save',               dest='save', action='store_true')
     ap.add_argument('--collect_stat',       dest='collect_stat', action='store_true')
@@ -1311,6 +1457,7 @@ if __name__ == "__main__":
     ap.set_defaults(drop_embed_var=None)
     ap.set_defaults(opt_clip_by_var=None)
     ap.set_defaults(GL=None)
+    ap.set_defaults(DC=None)
     ap.set_defaults(verbose=None)
     ap.set_defaults(save=True)
     args = ap.parse_args()

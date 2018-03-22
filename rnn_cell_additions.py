@@ -4,7 +4,7 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import random_ops
 from tensorflow.python.platform import tf_logging as logging
-from tensorflow.python.ops.rnn_cell_impl import RNNCell
+from tensorflow.python.ops.rnn_cell_impl import BasicLSTMCell
 from tensorflow.python.ops.rnn_cell_impl import LSTMStateTuple
 
 core_rnn_cell = tf.contrib.rnn
@@ -28,12 +28,12 @@ class VariationalDropoutWrapper(core_rnn_cell.RNNCell):
 
             with tf.name_scope("out_mask_gen"):
                 random_tensor = ops.convert_to_tensor(self._output_keep_prob)
-                random_tensor += random_ops.random_uniform([self._batch_size, self._cell.output_size])
+                random_tensor += random_ops.random_uniform([self._batch_size, self._cell.output_size], seed=570164)
                 self._gen_output_mask = math_ops.floor(random_tensor)
 
             with tf.name_scope("rec_mask_gen"):
                 random_tensor = ops.convert_to_tensor(self._state_keep_prob)
-                random_tensor += random_ops.random_uniform([self._batch_size, self._cell.state_size.h])
+                random_tensor += random_ops.random_uniform([self._batch_size, self._cell.state_size.h], seed=570164)
                 self._gen_state_mask = math_ops.floor(random_tensor)
 
     @property
@@ -70,14 +70,14 @@ class WeightDroppedVariationalDropoutWrapper(core_rnn_cell.RNNCell):
     def __init__(self, cell, batch_size, hidden_size, drop_hid=False):
         self._cell = cell
         self._new_output_keep_prob = tf.placeholder(tf.float32, shape=[], name="output_keep_prob")
-        self._output_keep_prob = tf.Variable(0.0, trainable=False, name="output_keep_prob")
+        self._output_keep_prob = tf.Variable(0.0, dtype=tf.float32, trainable=False, name="output_keep_prob")
         self._output_keep_prob_update = tf.assign(self._output_keep_prob, self._new_output_keep_prob,
                                                   name="update_output_mask")
         self._drop_hid = drop_hid
 
         if drop_hid:
             self._new_state_keep_prob = tf.placeholder(tf.float32, shape=[], name="state_keep_prob")
-            self._state_keep_prob = tf.Variable(0.0, trainable=False)
+            self._state_keep_prob = tf.Variable(0.0, dtype=tf.float32, trainable=False)
             self._state_keep_prob_update = tf.assign(self._state_keep_prob, self._new_state_keep_prob)
 
         self._batch_size = batch_size
@@ -88,7 +88,7 @@ class WeightDroppedVariationalDropoutWrapper(core_rnn_cell.RNNCell):
 
             with tf.name_scope("out_mask_gen"):
                 random_tensor = ops.convert_to_tensor(self._output_keep_prob)
-                random_tensor += random_ops.random_uniform([self._batch_size, self._cell.output_size])
+                random_tensor += random_ops.random_uniform([self._batch_size, self._cell.output_size],seed=570164, dtype=tf.float32)
                 self._gen_output_mask = math_ops.floor(random_tensor)
 
             if drop_hid:
@@ -96,8 +96,12 @@ class WeightDroppedVariationalDropoutWrapper(core_rnn_cell.RNNCell):
                                                   name="output_mask")
                 with tf.name_scope("rec_mask_gen"):
                     random_tensor = ops.convert_to_tensor(self._state_keep_prob)
-                    random_tensor += random_ops.random_uniform([self._batch_size, self._cell.state_size.h])
+                    random_tensor += random_ops.random_uniform([self._batch_size, self._cell.state_size.h], seed=570164, dtype=tf.float32)
                     self._gen_state_mask = math_ops.floor(random_tensor)
+
+    @property
+    def cell(self):
+        return self._cell
 
     @property
     def state_size(self):
@@ -111,8 +115,9 @@ class WeightDroppedVariationalDropoutWrapper(core_rnn_cell.RNNCell):
         masks = session.run({self._output_mask: self._gen_output_mask})
         if self._drop_hid:
             masks.update(session.run({self._state_mask: self._gen_state_mask}))
-        for key, val in self._cell.gen_masks(session).items():
-            masks[key] = val
+
+        # masks.update(self._cell.gen_masks(session))
+
         return masks
 
     def update_drop_params(self, session, output_keep_prob, state_keep_prob):
@@ -139,10 +144,10 @@ class WeightDroppedVariationalDropoutWrapper(core_rnn_cell.RNNCell):
         return new_h_out, new_state
 
 
-class WeightDroppedLSTMCell(RNNCell):
+class WeightDroppedLSTMCell(BasicLSTMCell):
     def __init__(self, num_units, is_training, dtype=tf.float32, state_is_tuple=True, reuse=None):
 
-        super(WeightDroppedLSTMCell, self).__init__(_reuse=reuse)
+        super(BasicLSTMCell, self).__init__(_reuse=reuse)
         if not state_is_tuple:
             logging.warn("%s: Using a concatenated state is slower and will soon be "
                          "deprecated.  Use state_is_tuple=True.", self)
@@ -152,7 +157,7 @@ class WeightDroppedLSTMCell(RNNCell):
         self._state_is_tuple = state_is_tuple
 
         self._new_rec_keep_prob = tf.placeholder(tf.float32, shape=[], name="new_rec_keep_prob")
-        self._rec_keep_prob = tf.Variable(0.0, trainable=False, name="weights_keep_prob")
+        self._rec_keep_prob = tf.Variable(0.0, dtype=tf.float32, trainable=False, name="weights_keep_prob")
 
         self._rec_keep_prob_update = tf.assign(self._rec_keep_prob, self._new_rec_keep_prob, name="update_rec_mask")
 
@@ -163,8 +168,9 @@ class WeightDroppedLSTMCell(RNNCell):
 
             with tf.name_scope("rec_mask_gen"):
                 random_tensor = ops.convert_to_tensor(self._rec_keep_prob)
-                random_tensor += random_ops.random_uniform([num_units, 4 * num_units])
+                random_tensor += random_ops.random_uniform([num_units, 4 * num_units], seed=570164, dtype=tf.float32)
                 self._gen_rec_mask = math_ops.floor(random_tensor)
+                # self._gen_rec_mask = tf.ones([num_units, 4 * num_units])
 
     @property
     def state_size(self):
@@ -220,7 +226,7 @@ class WeightDroppedLSTMCell(RNNCell):
         return new_h, new_state
 
     def gen_masks(self, session):
-            return session.run({self._rec_mask: self._gen_rec_mask})  # , self._assign_mem_mask
+        return session.run({self._rec_mask: self._gen_rec_mask})  # , self._assign_mem_mask
 
     def update_drop_params(self, session, rec_keep_prob):
         session.run(self._rec_keep_prob_update, feed_dict={self._new_rec_keep_prob: rec_keep_prob})
