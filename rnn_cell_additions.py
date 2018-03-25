@@ -170,7 +170,6 @@ class WeightDroppedLSTMCell(BasicLSTMCell):
                 random_tensor = ops.convert_to_tensor(self._rec_keep_prob)
                 random_tensor += random_ops.random_uniform([num_units, 4 * num_units], seed=570164, dtype=tf.float32)
                 self._gen_rec_mask = math_ops.floor(random_tensor)
-                # self._gen_rec_mask = tf.ones([num_units, 4 * num_units])
 
     @property
     def state_size(self):

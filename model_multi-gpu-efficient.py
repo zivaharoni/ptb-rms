@@ -187,8 +187,8 @@ class PTBModel(object):
 
         possible_cell = lstm_cell
         # if dropout is needed add a dropout wrapper
-        if is_training and (config.drop_output[0] != 0 or config.drop_output[1] != 0 or
-                            config.drop_state[0] != 0 or config.drop_state[1] != 0):
+        if is_training and (config.drop_output[0] != 1 or config.drop_output[1] != 1 or
+                            config.drop_state[0] != 1 or config.drop_state[1] != 1):
 
             def possible_cell(lstm_size):
                 if config.variational is not None:
@@ -431,9 +431,11 @@ class PTBModel(object):
 
     def gen_masks(self, session):
         feed_dict = {}
-        for i in range(config.lstm_layers_num):
-            feed_dict.update(self._cell[i].gen_masks(session))
-        if config.drop_embed_var:
+        if (self._config.drop_output[0] != 1 or self._config.drop_output[1] != 1 or
+                self._config.drop_state[0] != 1 or self._config.drop_state[1] != 1):
+            for i in range(config.lstm_layers_num):
+                feed_dict.update(self._cell[i].gen_masks(session))
+        if self._config.drop_embed_var:
             feed_dict.update(self.gen_emb_mask(session))
         if self._config.mos:
             feed_dict.update({self._mos_mask: session.run(self._gen_mos_mask)})
@@ -444,22 +446,25 @@ class PTBModel(object):
 
     def gen_wdrop_mask(self, session):
         masks = {}
-        for cell in self._cell:
-            masks.update(cell.cell.gen_masks(session))
+        if self._config.drop_state[0] != 1 or self._config.drop_state[1] != 1:
+            for cell in self._cell:
+                masks.update(cell.cell.gen_masks(session))
         return masks
 
     def update_drop_params(self, session, output_keep_prob, state_keep_prob):
-        for i in range(config.lstm_layers_num):
-            if i < config.lstm_layers_num -1:
-                logger.info("layer %d: out %.2f, state %.2f" % (i+1, output_keep_prob[0], state_keep_prob[0]))
-                self._cell[i].update_drop_params(session,
-                                                    output_keep_prob[0],
-                                                    state_keep_prob[0])
-            else:
-                logger.info("layer %d: out %.2f, state %.2f" % (i + 1, output_keep_prob[1], state_keep_prob[1]))
-                self._cell[i].update_drop_params(session,
-                                                    output_keep_prob[1],
-                                                    state_keep_prob[1])
+        if (config.drop_output[0] != 1 or config.drop_output[1] != 1 or
+                            config.drop_state[0] != 1 or config.drop_state[1] != 1):
+            for i in range(config.lstm_layers_num):
+                if i < config.lstm_layers_num -1:
+                    logger.info("layer %d: out %.2f, state %.2f" % (i+1, output_keep_prob[0], state_keep_prob[0]))
+                    self._cell[i].update_drop_params(session,
+                                                        output_keep_prob[0],
+                                                        state_keep_prob[0])
+                else:
+                    logger.info("layer %d: out %.2f, state %.2f" % (i + 1, output_keep_prob[1], state_keep_prob[1]))
+                    self._cell[i].update_drop_params(session,
+                                                        output_keep_prob[1],
+                                                        state_keep_prob[1])
 
 
 class PTBInput(object):
@@ -508,7 +513,10 @@ class SGDOptimizer(object):
         optimizer = tf.train.GradientDescentOptimizer(model.lr)
 
         if config.max_update_norm > 0:
-            self._updates, _ = tf.clip_by_global_norm(self._updates, config.max_update_norm)
+            if config.clip_by_layer:
+                self._updates = clip_by_layer(self._updates)
+            else:
+                self._updates, _ = tf.clip_by_global_norm(self._updates, config.max_update_norm)
         if use_opt:
             self._train_op = optimizer.apply_gradients(
                 zip(self._updates, tvars), global_step=model.global_step)
@@ -850,6 +858,26 @@ class RMSpropOptimizer(object):
         return tf.concat(gs, 0)
 
 
+def clip_by_layer(updates):
+    nlayers = config.lstm_layers_num + int(config.mos) + 1
+    print(nlayers)
+    clipped_updates = list()
+    for update, tvar in zip(updates, tf.trainable_variables()):
+        if "embedding" in tvar.op.name:
+            k = 0.5
+        elif "lstm" in tvar.op.name:
+            depth = float(re.findall("lstm([1-9])+", tvar.op.name)[0])
+            k = 0.5 + 0.5 * 1/nlayers * depth
+        elif "mos" in tvar.op.name or "out" in tvar.op.name:
+            k = 1
+        else:
+            raise ValueError("clip by layer: depth was not selected")
+        logger.info("clipping " + tvar.op.name + " by " + str(config.max_update_norm * k))
+        clipped_updates.append(tf.clip_by_norm(update, config.max_update_norm * k))
+
+    return clipped_updates
+
+
 def print_tvars():
     tvars = tf.trainable_variables()
     # print(tvars)
@@ -1029,7 +1057,6 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
 
     lr_decay = config.lr_decay
     current_lr = session.run(m.lr)
-
 
     if config.opt == "asgd" or config.opt == "arms":
         nonmono = 5
@@ -1441,7 +1468,7 @@ if __name__ == "__main__":
     ap.add_argument("--drop_i",             type=float, default=None, help="drop words")
     ap.add_argument("--mos_drop",           type=float, default=None, help="drop mos")
     ap.add_argument("--mos_context_num",    type=int, default=None, help="#of experts")
-    ap.add_argument("--wdecay",           type=float, default=None, help="weight decay")
+    ap.add_argument("--wdecay",             type=float, default=None, help="weight decay")
     ap.add_argument("--mos",                dest='mos', action='store_true')
     ap.add_argument("--no_eval",            dest='no_eval', action='store_true')
     ap.add_argument("--GL",                 dest='GL', action='store_false')
@@ -1450,8 +1477,10 @@ if __name__ == "__main__":
     ap.add_argument('--save',               dest='save', action='store_true')
     ap.add_argument('--collect_stat',       dest='collect_stat', action='store_true')
     ap.add_argument('--drop_embed_var',     dest='drop_embed_var', action='store_true')
+    ap.add_argument('--clip_by_layer',      dest='clip_by_layer', action='store_true')
 
     ap.set_defaults(collect_stat=None)
+    ap.set_defaults(clip_by_layer=None)
     ap.set_defaults(mos=None)
     ap.set_defaults(no_eval=None)
     ap.set_defaults(drop_embed_var=None)

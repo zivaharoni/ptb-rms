@@ -38,7 +38,7 @@ class MosConfig(object):
     forget_bias_init = 0.0
     init_scale = 0.04
     batch_size = 12
-    time_steps = 35
+    time_steps = 70
     units_num = [960, 960, 620]
     embedding_size = 280
     vocab_size = 10000
@@ -52,6 +52,7 @@ class MosConfig(object):
     lr = 20.0
     lr_decay = 1.0
     max_update_norm = 0.25
+    clip_by_layer = None
     layer_epoch = 1000
     entire_network_epoch = layer_epoch
 
@@ -75,9 +76,9 @@ class MosConfig(object):
 class MosGLConfig(object):
     forget_bias_init = 0.0
     init_scale = 0.04
-    batch_size = 200
+    batch_size = 20
     time_steps = 35
-    units_num = [50, 50, 50]
+    units_num = [850, 850, 850]
     embedding_size = 280
     vocab_size = 10000
     lstm_layers_num = 3
@@ -90,19 +91,19 @@ class MosGLConfig(object):
     lr = 20.0
     lr_decay = 1.0
     max_update_norm = 0.25
-    layer_epoch = 1
+    layer_epoch = 200
     entire_network_epoch = layer_epoch
 
     GL = True
     DC = True
     AR = 2.0
     TAR = 1.0
-    variational = 'epoch'
+    variational = 'batch'
     keep_prob_embed = 0.6
     drop_output = [0.775,0.6]
     drop_state = [0.5,0.5]
     drop_i = 0.9
-    drop_embed_var = False
+    drop_embed_var = True
     wdecay = 1.2e-6
 
     mos = True
@@ -118,17 +119,19 @@ class BestConfig(object):
     vocab_size = 10000
     seed = 570164
 
-    opt = "asgd"
+    opt = "sgd"
     opt_eps = 1e-5
     opt_inverse_type = "add"
-    lr = 1.0
+    lr = 35.
     lr_decay = 0.85
-    max_update_norm = 5.0
+    max_update_norm = 0.14
+    clip_by_layer = False
+
     layer_epoch = 300
     entire_network_epoch = layer_epoch
     forget_bias_init = 0.0
     lstm_layers_num = 3
-    GL = True #TODO cahnge to true
+    GL = True
     DC = False
     AR = 2.0
     TAR = 1.0
@@ -137,8 +140,9 @@ class BestConfig(object):
     keep_prob_embed = 0.4
     drop_output = [0.5, 0.27]
     drop_state = [0.5, 0.27]
-    drop_embed_var = False
-    drop_i = 1.0
+    drop_embed_var = None
+    drop_i = 0.9
+    wdecay = 1.2e-6
 
     mos = False
     mos_context_num = 0
