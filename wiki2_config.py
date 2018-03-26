@@ -34,13 +34,14 @@ class SmallConfig(object):
     mos_context_num = 0
     mos_drop = 0.0
 
+
 class MosConfig(object):
     forget_bias_init = 0.0
     init_scale = 0.04
-    batch_size = 12
+    batch_size = 5
     time_steps = 70
-    units_num = [960, 960, 620]
-    embedding_size = 280
+    units_num = [1150, 1150, 650]
+    embedding_size = 300
     vocab_size = 10000
     lstm_layers_num = 3
     seed = 570164
@@ -49,7 +50,7 @@ class MosConfig(object):
     opt_eps = 1e-5
     opt_inverse_type = "add"
 
-    lr = 20.0
+    lr = 15.0
     lr_decay = 1.0
     max_update_norm = 0.25
     clip_by_layer = None
@@ -57,12 +58,12 @@ class MosConfig(object):
     entire_network_epoch = layer_epoch
 
     GL = False
-    DC = False
+    DC = True
     AR = 2.0
     TAR = 1.0
     variational = 'batch'
-    keep_prob_embed = 0.6
-    drop_output = [0.775,0.6]
+    keep_prob_embed = 0.45
+    drop_output = [0.8,0.6]
     drop_state = [0.5,0.5]
     drop_i = 0.9
     drop_embed_var = True

@@ -9,6 +9,7 @@ import numpy as np
 import time
 import ptb_reader
 import ptb_config
+import wiki2_config
 import os
 import sys
 import ast
@@ -181,9 +182,8 @@ class PTBModel(object):
             else:
                 if is_training:
                     logger.info("using LSTM cell")
-                return tf.nn.rnn_cell.BasicLSTMCell(num_units=lstm_size,
-                                                    forget_bias=config.forget_bias_init,
-                                                    state_is_tuple=True)
+                return tf.contrib.rnn.LSTMBlockCell(num_units=lstm_size,
+                                                    forget_bias=config.forget_bias_init)
 
         possible_cell = lstm_cell
         # if dropout is needed add a dropout wrapper
@@ -291,7 +291,7 @@ class PTBModel(object):
                                               shape=[config.mos_context_num * config.embedding_size],
                                               dtype=tf.float32)
 
-                        h = tf.reshape(tf.tanh(tf.matmul(lstm_output[-1], w_h) + b_h), [-1, config.embedding_size])
+                        h = tf.reshape(tf.tanh(tf.nn.xw_plus_b(lstm_output[-1], w_h, b_h)), [-1, config.embedding_size])
 
                         if is_training:
                             self._mos_mask = tf.placeholder(dtype=tf.float32,
@@ -313,7 +313,7 @@ class PTBModel(object):
 
                             h = math_ops.div(h, config.mos_drop) * self._mos_mask
 
-                        a = tf.reshape(tf.matmul(h, w_out) + b_out, [-1, config.vocab_size])
+                        a = tf.reshape(tf.nn.xw_plus_b(h, w_out, b_out), [-1, config.vocab_size])
                         # mos
                         a_mos = tf.reshape(tf.nn.softmax(a), [-1, config.mos_context_num, config.vocab_size])
                         pi = tf.reshape(pi, [-1, config.mos_context_num, 1])
@@ -367,6 +367,9 @@ class PTBModel(object):
         final_state = state
 
         return raw_loss, grads, cell, initial_state, final_state, softmax
+
+    # def build_rnn_graph(self, inputs, config, is_training):
+
 
     @property
     def initial_state(self):
@@ -435,8 +438,7 @@ class PTBModel(object):
                 self._config.drop_state[0] != 1 or self._config.drop_state[1] != 1):
             for i in range(config.lstm_layers_num):
                 feed_dict.update(self._cell[i].gen_masks(session))
-        if self._config.drop_embed_var:
-            feed_dict.update(self.gen_emb_mask(session))
+
         if self._config.mos:
             feed_dict.update({self._mos_mask: session.run(self._gen_mos_mask)})
         return feed_dict
@@ -1328,7 +1330,7 @@ def main():
             if vars2load is not None and GL:
                 restore_saver = tf.train.Saver(var_list=vars2load)
 
-            config.tvars_num = '%2.4fM' %(tvars_num()*1e-6)
+            config.tvars_num = '%fM' %(tvars_num()*1e-6)
             print_tvars()
 
         sess_config = tf.ConfigProto(device_count={"CPU": 2},
@@ -1492,7 +1494,12 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     ###################################### data read & general configs ######################################
-    config_pool = ptb_config
+    if args.data == "ptb":
+        config_pool = ptb_config
+    elif args.data == "wiki2":
+        config_pool = wiki2_config
+    else:
+        raise ValueError("Invalid database")
     reader = ptb_reader.ptb_raw_data
 
     config = get_config(args.model)
