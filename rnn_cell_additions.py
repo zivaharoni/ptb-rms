@@ -24,7 +24,7 @@ class VariationalDropoutWrapper(core_rnn_cell.RNNCell):
         self._batch_size = batch_size
         with tf.name_scope("variational_masks"):
             self._output_mask = tf.placeholder(dtype=tf.float32, shape=[self._batch_size, hidden_size], name="output_mask")
-            self._state_mask = tf.placeholder(dtype=tf.float32, shape=[self._batch_size, hidden_size], name="output_mask")
+            self._state_mask = tf.placeholder(dtype=tf.float32, shape=[self._batch_size, hidden_size], name="state_mask")
 
             with tf.name_scope("out_mask_gen"):
                 random_tensor = ops.convert_to_tensor(self._output_keep_prob)
