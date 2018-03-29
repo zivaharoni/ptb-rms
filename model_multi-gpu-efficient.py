@@ -1164,7 +1164,9 @@ def train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver
             lr_sum = tf.Summary(value=[tf.Summary.Value(tag="learning_rate_track" + str(layer),
                                                        simple_value=current_lr)])
             train_writer.add_summary(lr_sum, i + 1)
-            if (config.opt == "asgd" or config.opt == "arms") and not session.run(m.optimizer.trigger):
+            if (config.opt == "asgd" or config.opt == "arms" or
+                config.opt == "masgd" or config.opt == "marms")\
+                    and not session.run(m.optimizer.trigger):
                 if len(valid_perplexity) > nonmono and np.min(valid_perplexity[:-nonmono]) < valid_perplexity[-1]:
                     logger.info("setting trigger and T")
                     m.optimizer.set_trigger(session)

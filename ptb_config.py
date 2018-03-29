@@ -76,8 +76,8 @@ class MosConfig(object):
 class MosGLConfig(object):
     forget_bias_init = 0.0
     init_scale = 0.04
-    batch_size = 20
-    time_steps = 35
+    batch_size = 12
+    time_steps = 70
     units_num = [850, 850, 850]
     embedding_size = 280
     vocab_size = 10000
@@ -91,11 +91,12 @@ class MosGLConfig(object):
     lr = 20.0
     lr_decay = 1.0
     max_update_norm = 0.25
-    layer_epoch = 200
+    clip_by_layer = None
+    layer_epoch = 400
     entire_network_epoch = layer_epoch
 
     GL = True
-    DC = True
+    DC = False
     AR = 2.0
     TAR = 1.0
     variational = 'batch'
@@ -107,7 +108,7 @@ class MosGLConfig(object):
     wdecay = 1.2e-6
 
     mos = True
-    mos_context_num = 3
+    mos_context_num = 15
     mos_drop = 0.71
 
 
