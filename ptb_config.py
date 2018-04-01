@@ -34,6 +34,7 @@ class SmallConfig(object):
     mos_context_num = 0
     mos_drop = 0.0
 
+
 class MosConfig(object):
     forget_bias_init = 0.0
     init_scale = 0.04
@@ -72,16 +73,25 @@ class MosConfig(object):
     mos_context_num = 15
     mos_drop = 0.71
 
+    dynamic_eval = True
+    dynamic_rms_step = True
+    dynamic_rms_decay = True
+    dynamic_decay = 0.025
+    dynamic_lr = 1.
+    dynamic_time_steps = 5
+    dynamic_epsilon = 1e-8
+    dynamic_clip_total_update = True
+
 
 class MosGLConfig(object):
     forget_bias_init = 0.0
     init_scale = 0.04
     batch_size = 12
     time_steps = 70
-    units_num = [850, 850, 850]
+    units_num = [850, 850, 850, 850, 850]
     embedding_size = 280
     vocab_size = 10000
-    lstm_layers_num = 3
+    lstm_layers_num = 5
     seed = 570164
 
     opt = "asgd"
@@ -95,7 +105,7 @@ class MosGLConfig(object):
     layer_epoch = 400
     entire_network_epoch = layer_epoch
 
-    GL = True
+    GL = False
     DC = False
     AR = 2.0
     TAR = 1.0
@@ -110,6 +120,15 @@ class MosGLConfig(object):
     mos = True
     mos_context_num = 15
     mos_drop = 0.71
+
+    dynamic_eval = False
+    dynamic_rms_step = True
+    dynamic_rms_decay = True
+    dynamic_decay = 0.025
+    dynamic_lr = 1.
+    dynamic_time_steps = 5
+    dynamic_epsilon = 1e-8
+    dynamic_clip_total_update = True
 
 
 class BestConfig(object):

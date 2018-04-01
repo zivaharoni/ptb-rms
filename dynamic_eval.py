@@ -13,10 +13,11 @@ class DynamicEval(object):
         self._decay = config.dynamic_decay
         self._rms_step = config.dynamic_rms_step
         self._rms_decay = config.dynamic_rms_decay
-        self._max_grad_norm = config.max_grad_norm
+        # self._max_grad_norm = config.max_grad_norm
         self._max_update_norm = config.max_update_norm
 
-        self._clipped_grads,_ = tf.clip_by_global_norm(grads, self._max_grad_norm)
+        # self._clipped_grads,_ = tf.clip_by_global_norm(grads, self._max_grad_norm)
+        self._clipped_grads = grads
 
         self._global_ms = []
         self._global_vars = []
@@ -69,22 +70,35 @@ class DynamicEval(object):
         return self._global_vars_assign_op
 
     def update_op(self):
+
+        grads = list()
+        for tvar, grad, ms, gvar, dec in zip(self._tvars, self._clipped_grads, self._global_ms, self._global_vars, self._decrate):
+            grads.append(self.grad_update(grad, ms))
+
+        if self._config.dynamic_clip_total_update is not None:
+            grads, _ = tf.clip_by_global_norm(grads, self._config.max_update_norm)
+
         updates = list()
         eta = self._step_size
         lamb = self._decay
-        for tvar, grad, ms, gvar, dec in zip(self._tvars, self._clipped_grads, self._global_ms, self._global_vars, self._decrate):
-            delta = tf.multiply(-eta, self.grad_update(grad, ms)) + tf.multiply(lamb, self.global_prior_decay(tvar, gvar, dec))
+        for tvar, grad, ms, gvar, dec in zip(self._tvars, grads, self._global_ms, self._global_vars, self._decrate):
+            delta = tf.multiply(-eta, grad) + tf.multiply(lamb, self.global_prior_decay(tvar, gvar, dec))
             updates.append(tf.assign_add(tvar, delta))
 
         return updates
 
     def grad_update(self, grad, ms):
         if self._rms_step is True:
-            new_grad = grad / (tf.sqrt(ms) + self._eps)
-            if self._config.dynamic_clip_total_update is not None:
-                new_grad = tf.cond(tf.greater_equal(self._max_update_norm, tf.norm(new_grad)),
-                                   true_fn=lambda:new_grad,
-                                   false_fn=lambda:tf.divide(new_grad, tf.norm(new_grad))*self._max_update_norm)
+            # if self._config.opt_inverse_type == "add":
+            #     new_grad = grad / (ms + self._eps)
+            # elif self._config.opt_inverse_type == "pseudo":
+            #     condition = tf.greater_equal(ms, self._eps)
+            #     new_grad = tf.where(condition, grad / ms, tf.zeros_like(ms))
+            new_grad = grad / (ms + self._eps)
+            # if self._config.dynamic_clip_total_update is not None:
+            #     new_grad = tf.cond(tf.greater_equal(self._max_update_norm, tf.norm(new_grad)),
+            #                        true_fn=lambda:new_grad,
+            #                        false_fn=lambda:tf.divide(new_grad, tf.norm(new_grad))*self._max_update_norm)
         else:
             new_grad = grad
 

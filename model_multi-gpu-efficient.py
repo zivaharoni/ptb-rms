@@ -540,7 +540,7 @@ class PTBModel(object):
     def gen_wdrop_mask(self, session):
         masks = {}
         if self._config.drop_state[0] != 1 or self._config.drop_state[1] != 1:
-            for cell in self._cell:
+            for cell in self._cell._cells:
                 masks.update(cell.cell.gen_masks(session))
         return masks
 
@@ -911,21 +911,6 @@ class RMSpropOptimizer(object):
             u_norm.append(tf.reduce_sum(tf.square(update)))
         return tf.sqrt(tf.add_n(g_norm)), tf.reduce_min(tf.stack(ms_norm)), tf.sqrt(tf.add_n(u_norm))
 
-    def clip_by_layer(self):
-        L = self._config.lstm_layers_num
-        updates = list()
-        clipped, _ = tf.clip_by_global_norm([self._updates[0],self._updates[1]], self._max_update_norm)
-        updates.extend(clipped)
-        for i in range(L):
-            k = 2 + 2 * i
-            clipped, _ = tf.clip_by_global_norm([self._updates[k], self._updates[k + 1]],
-                                                  self._max_update_norm)
-            updates.extend(clipped)
-
-        updates.append(tf.clip_by_norm(self._updates[-1], self._max_update_norm))
-
-        return updates
-
     def get_ms_max(self):
         ms_max = []
         for ms in self._ms:
@@ -952,14 +937,13 @@ class RMSpropOptimizer(object):
 
 def clip_by_layer(updates):
     nlayers = config.lstm_layers_num + int(config.mos) + 1
-    print(nlayers)
     clipped_updates = list()
     for update, tvar in zip(updates, tf.trainable_variables()):
         if "embedding" in tvar.op.name:
-            k = 0.5
-        elif "lstm" in tvar.op.name:
-            depth = float(re.findall("lstm([1-9])+", tvar.op.name)[0])
-            k = 0.5 + 0.5 * 1/nlayers * depth
+            k = 0.333
+        elif "cell_" in tvar.op.name:
+            # depth = float(re.findall("cell_([1-9])+", tvar.op.name)[0]) + 1
+            k = 1
         elif "mos" in tvar.op.name or "out" in tvar.op.name:
             k = 1
         else:
@@ -1314,18 +1298,18 @@ def get_vars2restore(layer, units_num):
     else:
         vars2load = []
         for var in tf.trainable_variables():
-            # print(var.op.name)
+            print(var.op.name)
             if var.op.name == "Model/w_embed_out":
                  if units_num[layer] == units_num[layer-1]:
-                     # print("added")
+                     print("added")
                      vars2load.append(var)
             if "cell_" in var.op.name:
                 lstm_idx = re.findall("cell_([0-9])+", var.op.name)
-                if int(lstm_idx[0]) <= layer:
+                if int(lstm_idx[0]) < layer:
                     vars2load.append(var)
-                    # print("added")
+                    print("added")
             if "mos" in var.op.name and units_num[layer] == units_num[layer-1]:
-                # print("added")
+                print("added")
                 vars2load.append(var)
 
         return vars2load
@@ -1368,23 +1352,97 @@ def remove_tempstate_files(dir):
 
 def main():
 
-    ###################################### GL configs and restore ######################################
-    GL = config.GL
-    units_num = config.units_num[:]
-    start_layer = 0 if config.GL else config.lstm_layers_num - 1
+    if args.finetune is None:
+        logger.info("training model...")
+        ###################################### GL configs and restore ######################################
+        GL = config.GL
+        units_num = config.units_num[:]
+        start_layer = 0 if config.GL else config.lstm_layers_num - 1
 
-    if args.start_layer is not None:
-        if args.ckpt_file is None:
-            raise ValueError("must provide ckpt_file flag with start_layer_flag")
-        print("\nstarting training from layer: %d\n" % args.start_layer)
-        start_layer = args.start_layer - 1
+        if args.start_layer is not None:
+            if args.ckpt_file is None:
+                raise ValueError("must provide ckpt_file flag with start_layer_flag")
+            print("\nstarting training from layer: %d\n" % args.start_layer)
+            start_layer = args.start_layer - 1
 
-    start_time_total = time.time()
+        start_time_total = time.time()
 
-    ###################################### GL training ######################################
-    for layer in range(start_layer, config.lstm_layers_num):
-        config.lstm_layers_num = layer + 1
-        config.units_num = units_num[:layer+1]
+        ###################################### GL training ######################################
+        for layer in range(start_layer, config.lstm_layers_num):
+            config.lstm_layers_num = layer + 1
+            config.units_num = units_num[:layer+1]
+
+            ###################################### build graph ######################################
+            with tf.Graph().as_default() as graph:
+                tf.set_random_seed(seed)
+                np.random.seed(seed)
+
+                initializer = tf.random_uniform_initializer(-config.init_scale,
+                                                            config.init_scale, seed=seed)
+
+                with tf.name_scope("Train"):
+                    logger.info("building model with dimensions %d->%d->%s->%d" %
+                                (config.vocab_size, config.embedding_size, str(config.units_num).replace(" ", ""), config.vocab_size))
+                    with tf.variable_scope("Model", reuse=None, initializer=initializer):
+                        train_input = PTBInput(config=config, data=train_data)
+                        m = PTBModel(is_training=True, config=config, inputs=train_input)
+                    train_writer = tf.summary.FileWriter(directory + '/train',
+                                                         graph=tf.get_default_graph())
+                    logger.info("train shape: (%d,%d), train len: %d, epoch size: %d" %
+                                (train_input.data.shape[0], train_input.data.shape[1], train_input.data_len, train_input.epoch_size))
+
+                with tf.name_scope("Valid"):
+                    with tf.variable_scope("Model", reuse=True, initializer=initializer):
+                        valid_input = PTBInput(config=config, data=valid_data)
+                        mvalid = PTBModel(is_training=False, config=config, inputs=valid_input)
+                    valid_writer = tf.summary.FileWriter(directory + '/valid')
+                    logger.info("valid shape: (%d,%d), valid len: %d, epoch size: %d" %
+                                (valid_input.data.shape[0], valid_input.data.shape[1], valid_input.data_len,
+                                 valid_input.epoch_size))
+
+                saver = tf.train.Saver(var_list=tf.trainable_variables())
+                vars2load = get_vars2restore(layer, units_num)
+                if vars2load is not None and GL:
+                    restore_saver = tf.train.Saver(var_list=vars2load)
+
+                config.tvars_num = '%fM' %(tvars_num()*1e-6)
+                print_tvars()
+
+            sess_config = tf.ConfigProto(device_count={"CPU": 2},
+                                         inter_op_parallelism_threads=2,
+                                         intra_op_parallelism_threads=8)
+
+            sess_config.gpu_options.allow_growth = True
+            sess_config.gpu_options.visible_device_list = ",".join(get_gpu_devices(args.gpu_devices))
+
+            ###################################### train ######################################
+            with tf.Session(graph=graph, config=sess_config) as session:
+                session.run(tf.global_variables_initializer())
+                config.units_num = units_num[:layer + 1]
+
+                if vars2load is not None and GL:
+                    restore_saver.restore(session, directory + '/saver/best_model' + str(layer - 1))
+
+                logger.info("training layer #%d" % (layer + 1))
+
+                start_time = time.time()
+                train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver)
+                elapsed = time.time() - start_time
+
+                logger.info("optimization of layer %d took %02d:%02d:%02d\n" %
+                      (layer + 1, elapsed // 3600, (elapsed // 60) % 60, elapsed % 60))
+
+            tf.reset_default_graph()
+
+            train_writer.close()
+            valid_writer.close()
+
+        elapsed = time.time() - start_time_total
+        logger.info("optimization took %02d:%02d:%02d\n" % (elapsed // 3600, (elapsed // 60) % 60, elapsed % 60))
+
+    else:
+        ###################################### fine-tune ######################################
+        logger.info("finetuning model...")
 
         ###################################### build graph ######################################
         with tf.Graph().as_default() as graph:
@@ -1396,14 +1454,16 @@ def main():
 
             with tf.name_scope("Train"):
                 logger.info("building model with dimensions %d->%d->%s->%d" %
-                            (config.vocab_size, config.embedding_size, str(config.units_num).replace(" ", ""), config.vocab_size))
+                            (config.vocab_size, config.embedding_size, str(config.units_num).replace(" ", ""),
+                             config.vocab_size))
                 with tf.variable_scope("Model", reuse=None, initializer=initializer):
                     train_input = PTBInput(config=config, data=train_data)
                     m = PTBModel(is_training=True, config=config, inputs=train_input)
                 train_writer = tf.summary.FileWriter(directory + '/train',
                                                      graph=tf.get_default_graph())
                 logger.info("train shape: (%d,%d), train len: %d, epoch size: %d" %
-                            (train_input.data.shape[0], train_input.data.shape[1], train_input.data_len, train_input.epoch_size))
+                            (train_input.data.shape[0], train_input.data.shape[1], train_input.data_len,
+                             train_input.epoch_size))
 
             with tf.name_scope("Valid"):
                 with tf.variable_scope("Model", reuse=True, initializer=initializer):
@@ -1415,44 +1475,37 @@ def main():
                              valid_input.epoch_size))
 
             saver = tf.train.Saver(var_list=tf.trainable_variables())
-            vars2load = get_vars2restore(layer, units_num)
-            if vars2load is not None and GL:
-                restore_saver = tf.train.Saver(var_list=vars2load)
 
-            config.tvars_num = '%fM' %(tvars_num()*1e-6)
+            config.tvars_num = '%fM' % (tvars_num() * 1e-6)
             print_tvars()
 
-        sess_config = tf.ConfigProto(device_count={"CPU": 2},
-                                     inter_op_parallelism_threads=2,
-                                     intra_op_parallelism_threads=8)
+            sess_config = tf.ConfigProto(device_count={"CPU": 2},
+                                         inter_op_parallelism_threads=2,
+                                         intra_op_parallelism_threads=8)
 
-        sess_config.gpu_options.allow_growth = True
-        sess_config.gpu_options.visible_device_list = ",".join(get_gpu_devices(args.gpu_devices))
+            sess_config.gpu_options.allow_growth = True
+            sess_config.gpu_options.visible_device_list = ",".join(get_gpu_devices(args.gpu_devices))
 
         ###################################### train ######################################
         with tf.Session(graph=graph, config=sess_config) as session:
             session.run(tf.global_variables_initializer())
-            config.units_num = units_num[:layer + 1]
+            if args.ckpt_file is None:
+                raise ValueError("must provide ckpt_file flag with start_layer_flag")
+            saver.restore(session,args.ckpt_file)
 
-            if vars2load is not None and GL:
-                restore_saver.restore(session, directory + '/saver/best_model' + str(layer - 1))
-
-            logger.info("training layer #%d" % (layer + 1))
+            m.optimizer.set_trigger(session)
 
             start_time = time.time()
-            train_optimizer(session, layer, m, mvalid, train_writer, valid_writer, saver)
+            train_optimizer(session, "finetune%d"%(config.lstm_layers_num-1),
+                            m, mvalid, train_writer, valid_writer, saver)
             elapsed = time.time() - start_time
 
-            logger.info("optimization of layer %d took %02d:%02d:%02d\n" %
-                  (layer + 1, elapsed // 3600, (elapsed // 60) % 60, elapsed % 60))
+            logger.info("fine-tuning took %02d:%02d:%02d\n" % (elapsed // 3600, (elapsed // 60) % 60, elapsed % 60))
 
         tf.reset_default_graph()
 
         train_writer.close()
         valid_writer.close()
-
-    elapsed = time.time() - start_time_total
-    logger.info("optimization took %02d:%02d:%02d\n" % (elapsed // 3600, (elapsed // 60) % 60, elapsed % 60))
 
 
 
@@ -1570,6 +1623,9 @@ if __name__ == "__main__":
     ap.add_argument('--drop_embed_var',     dest='drop_embed_var', action='store_true')
     ap.add_argument('--clip_by_layer',      dest='clip_by_layer', action='store_true')
 
+    ap.add_argument('--finetune',           dest='finetune', action='store_true')
+
+    ap.set_defaults(finetune=None)
     ap.set_defaults(collect_stat=None)
     ap.set_defaults(clip_by_layer=None)
     ap.set_defaults(mos=None)
@@ -1611,7 +1667,10 @@ if __name__ == "__main__":
     simulation_name = get_simulation_name(config)
     model_config_name = args.model
 
-    directory = "./results/" + simulation_name + "_seed" + str(seed)
+    if args.ckpt_file is None:
+        directory = "./results/" + simulation_name + "_seed" + str(seed)
+    else:
+        directory = "/".join(args.ckpt_file.split("/")[:-2])
     data_path = "./data"
 
     if args.save:
@@ -1628,7 +1687,10 @@ if __name__ == "__main__":
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    fileHandler = logging.FileHandler("{0}/logger.log".format(directory))
+    if args.finetune is None:
+        fileHandler = logging.FileHandler("{0}/logger.log".format(directory))
+    else:
+        fileHandler = logging.FileHandler("{0}/logger-finetune{1}.log".format(directory, config.lstm_layers_num-1))
     fileHandler.setFormatter(logFormatter)
     logger.addHandler(fileHandler)
 
