@@ -88,10 +88,10 @@ class MosGLConfig(object):
     init_scale = 0.04
     batch_size = 12
     time_steps = 70
-    units_num = [850, 850, 850, 850, 850]
+    units_num = [850, 850, 850, 850]
     embedding_size = 280
     vocab_size = 10000
-    lstm_layers_num = 5
+    lstm_layers_num = 4
     seed = 570164
 
     opt = "asgd"
@@ -105,8 +105,8 @@ class MosGLConfig(object):
     layer_epoch = 400
     entire_network_epoch = layer_epoch
 
-    GL = False
-    DC = False
+    GL = True
+    DC = True
     AR = 2.0
     TAR = 1.0
     variational = 'batch'
@@ -116,6 +116,7 @@ class MosGLConfig(object):
     drop_i = 0.9
     drop_embed_var = True
     wdecay = 1.2e-6
+    shortcut = True
 
     mos = True
     mos_context_num = 15

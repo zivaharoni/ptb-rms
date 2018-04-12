@@ -95,7 +95,7 @@ class PTBModel(object):
                 embedding_out = embedding
 
         with tf.name_scope("inner_model"): # tf.device("/gpu:%d" % self._gpu_devices),
-            loss, grads, cell, initial_state, final_state, softmax = self.complete_model(embedding_out,
+            loss, grads, cell, initial_state, final_state, softmax = self._complete_model(embedding_out,
                                                                                          embedding_map,
                                                                                          is_training)
 
@@ -154,7 +154,7 @@ class PTBModel(object):
                 else:
                     raise ValueError( config.opt + " is not a valid optimizer")
 
-    def complete_model(self, embedding_out, embedding_map, is_training):
+    def _complete_model(self, embedding_out, embedding_map, is_training):
         """ Build rest of model for a single gpu
 
         Args:
@@ -253,6 +253,39 @@ class PTBModel(object):
         #         lstm_output.append(tf.reshape(tf.concat(values=outputs[i], axis=1), [-1, lstm_size]))
         #
         # lstm_output = lstm_output[-1]
+
+        if config.shortcut:
+            w_sc = tf.get_variable(name="W_sc",
+                                   dtype=tf.float32,initializer=tf.zeros([config.embedding_size,
+                                                                           config.units_num[config.lstm_layers_num-1]],
+                                                                           dtype=tf.float32),
+                                   trainable=False)
+            # b_sc = tf.get_variable(name="b_sc",
+            #                        dtype=tf.float32, initializer=tf.zeros([config.units_num[config.lstm_layers_num - 1]],
+            #                                                               dtype=tf.float32))
+
+
+            sc_state = tf.matmul(tf.reshape(embedding_out, [-1,config.embedding_size]), w_sc)
+            if is_training:
+                self._sc_state_mask = tf.placeholder(dtype=tf.float32,
+                                                     shape=[config.batch_size * config.time_steps,
+                                                            config.units_num[config.lstm_layers_num-1]],
+                                                     name="mos_mask")
+                if config.variational is not None:
+                    with tf.name_scope("mos_mask_gen"):
+                        random_tensor = ops.convert_to_tensor(config.drop_output[-1])
+                        random_tensor += random_ops.random_uniform(
+                            [config.batch_size, 1, config.units_num[config.lstm_layers_num-1]], seed=seed)
+                        random_tensor = tf.tile(random_tensor, [1, config.time_steps, 1])
+                        self._gen_sc_state_mask = tf.reshape(math_ops.floor(random_tensor),
+                                                        [config.batch_size * config.time_steps,
+                                                         config.units_num[config.lstm_layers_num-1]])
+                else:
+                    raise ValueError("variational dropout for short-cut connection is not implemented")
+
+                sc_state = math_ops.div(sc_state, config.drop_output[-1]) * self._sc_state_mask
+
+            lstm_output += sc_state
 
         if config.embedding_size == config.units_num[-1] or config.mos:
             # outer softmax matrix is tied with embedding matrix
@@ -529,7 +562,8 @@ class PTBModel(object):
                 self._config.drop_state[0] != 1 or self._config.drop_state[1] != 1):
             for i in range(config.lstm_layers_num):
                 feed_dict.update(self._cell._cells[i].gen_masks(session))
-
+        if config.shortcut:
+            feed_dict.update({self._sc_state_mask: session.run(self._gen_sc_state_mask)})
         if self._config.mos:
             feed_dict.update({self._mos_mask: session.run(self._gen_mos_mask)})
         return feed_dict
@@ -558,6 +592,7 @@ class PTBModel(object):
                     self._cell._cells[i].update_drop_params(session,
                                                         output_keep_prob[1],
                                                         state_keep_prob[1])
+
 
 class PTBInput(object):
     """The input data."""
@@ -590,6 +625,7 @@ class PTBInput(object):
     def get_batch(self, idx):
         return {self.input_data: self.data[:, idx:idx+self.time_steps],
                     self.targets: self.label[:, idx:idx + self.time_steps]}
+
 ###################################### ADD TO RMS OPTIMIZER ##############################################
 ############################################################################################################
 #######             if args.collect_stat:                                                           ########
@@ -940,7 +976,7 @@ def clip_by_layer(updates):
     clipped_updates = list()
     for update, tvar in zip(updates, tf.trainable_variables()):
         if "embedding" in tvar.op.name:
-            k = 0.333
+            k = 0.48
         elif "cell_" in tvar.op.name:
             # depth = float(re.findall("cell_([1-9])+", tvar.op.name)[0]) + 1
             k = 1
@@ -1421,7 +1457,13 @@ def main():
                 config.units_num = units_num[:layer + 1]
 
                 if vars2load is not None and GL:
+                    logger.info("loading from %s/saver/best_model%d" % (directory, layer-1))
                     restore_saver.restore(session, directory + '/saver/best_model' + str(layer - 1))
+
+                # if args.trig and args.start_layer is not None:
+                #     saver.restore(session, args.ckpt_file)
+                #     m.optimizer.set_trigger(session)
+                #     args.start_layer = None
 
                 logger.info("training layer #%d" % (layer + 1))
 
@@ -1622,9 +1664,11 @@ if __name__ == "__main__":
     ap.add_argument('--collect_stat',       dest='collect_stat', action='store_true')
     ap.add_argument('--drop_embed_var',     dest='drop_embed_var', action='store_true')
     ap.add_argument('--clip_by_layer',      dest='clip_by_layer', action='store_true')
+    ap.add_argument('--trig',               dest='trig', action='store_true')
 
     ap.add_argument('--finetune',           dest='finetune', action='store_true')
 
+    ap.set_defaults(trig=None)
     ap.set_defaults(finetune=None)
     ap.set_defaults(collect_stat=None)
     ap.set_defaults(clip_by_layer=None)
@@ -1722,9 +1766,9 @@ if __name__ == "__main__":
         for handler in handlers:
             handler.close()
             logger.removeHandler(handler)
-        if args.save:
-            if os.path.exists(directory):
-                shutil.rmtree(directory)
+        # if args.save:
+        #     if os.path.exists(directory):
+        #         shutil.rmtree(directory)
 
 
 # TODO: add norms method for every optimizer
