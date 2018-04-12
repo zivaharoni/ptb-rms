@@ -255,11 +255,11 @@ class PTBModel(object):
         # lstm_output = lstm_output[-1]
 
         if config.shortcut:
-            w_sc = tf.get_variable(name="W_sc",
-                                   dtype=tf.float32,initializer=tf.zeros([config.embedding_size,
-                                                                           config.units_num[config.lstm_layers_num-1]],
-                                                                           dtype=tf.float32),
-                                   trainable=False)
+            self.shortcut_proj = w_sc = tf.get_variable(name="W_sc",
+                                                         dtype=tf.float32,initializer=tf.zeros([config.embedding_size,
+                                                                                                config.units_num[config.lstm_layers_num-1]],
+                                                                                               dtype=tf.float32),
+                                                         trainable=False)
             # b_sc = tf.get_variable(name="b_sc",
             #                        dtype=tf.float32, initializer=tf.zeros([config.units_num[config.lstm_layers_num - 1]],
             #                                                               dtype=tf.float32))
@@ -1436,8 +1436,13 @@ def main():
                                 (valid_input.data.shape[0], valid_input.data.shape[1], valid_input.data_len,
                                  valid_input.epoch_size))
 
-                saver = tf.train.Saver(var_list=tf.trainable_variables())
+                vars2save = tf.trainable_variables()
                 vars2load = get_vars2restore(layer, units_num)
+                if config.shortcut:
+                    vars2save.append(m.shortcut_proj)
+                    vars2load.append(m.shortcut_proj)
+
+                saver = tf.train.Saver(var_list=vars2save)
                 if vars2load is not None and GL:
                     restore_saver = tf.train.Saver(var_list=vars2load)
 
