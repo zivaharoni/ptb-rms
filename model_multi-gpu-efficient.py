@@ -1440,11 +1440,13 @@ def main():
                 vars2load = get_vars2restore(layer, units_num)
                 if config.shortcut:
                     vars2save.append(m.shortcut_proj)
-                    vars2load.append(m.shortcut_proj)
 
                 saver = tf.train.Saver(var_list=vars2save)
                 if vars2load is not None and GL:
                     restore_saver = tf.train.Saver(var_list=vars2load)
+                    if config.shortcut:
+                        vars2load.append(m.shortcut_proj)
+
 
                 config.tvars_num = '%fM' %(tvars_num()*1e-6)
                 print_tvars()
