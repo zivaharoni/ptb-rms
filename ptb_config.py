@@ -88,10 +88,10 @@ class MosGLConfig(object):
     init_scale = 0.04
     batch_size = 12
     time_steps = 70
-    units_num = [850, 850, 850, 850]
+    units_num = [850] * 3
     embedding_size = 280
     vocab_size = 10000
-    lstm_layers_num = 4
+    lstm_layers_num = 3
     seed = 570164
 
     opt = "asgd"

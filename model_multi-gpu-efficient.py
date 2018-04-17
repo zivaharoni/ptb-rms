@@ -169,123 +169,8 @@ class PTBModel(object):
         batch_size = config.batch_size
         time_steps = config.time_steps  # num of time steps used in BPTT
         vocab_size = config.vocab_size  # num of possible words
-        # units_num = config.units_num  # num of units in the hidden layer
-        #
-        # def lstm_cell(lstm_size):
-        #     if config.DC:
-        #         if is_training:
-        #             logger.info("using weight-dropped LSTM cell")
-        #         return dr.WeightDroppedLSTMCell(num_units=lstm_size,
-        #                                         is_training=is_training,
-        #                                         state_is_tuple=True)
-        #     else:
-        #         if is_training:
-        #             logger.info("using LSTM cell")
-        #         return tf.contrib.rnn.LSTMBlockCell(num_units=lstm_size,
-        #                                             forget_bias=config.forget_bias_init)
-        #
-        # possible_cell = lstm_cell
-        # # if dropout is needed add a dropout wrapper
-        # if is_training and (config.drop_output[0] < 1 or config.drop_output[1] < 1 or
-        #                             config.drop_state[0] < 1 or config.drop_state[1] < 1):
-        #     def possible_cell(lstm_size):
-        #         if config.variational is not None:
-        #             if config.DC:
-        #                 if is_training:
-        #                     logger.info("using weight-dropped variational dropout")
-        #                 return dr.WeightDroppedVariationalDropoutWrapper(lstm_cell(lstm_size),
-        #                                                                  batch_size,
-        #                                                                  lstm_size)
-        #             else:
-        #                 if is_training:
-        #                     logger.info("using variational dropout")
-        #                 return dr.VariationalDropoutWrapper(lstm_cell(lstm_size),
-        #                                                     batch_size,
-        #                                                     lstm_size)
-        #         else:
-        #             if config.DC:
-        #                 raise ValueError("DC is used with variational dropout")
-        #             if is_training:
-        #                 logger.info("using naive dropout")
-        #             return tf.nn.rnn_cell.DropoutWrapper(lstm_cell(lstm_size),
-        #                                                  output_keep_prob=config.drop_output)
-        # with tf.device("/gpu:0"):
+
         lstm_output, cell, state, initial_state = self._build_rnn_graph(embedding_out, is_training)
-        # # organize layers' outputs and states in a list
-        # cell = []
-        # initial_state = []
-        # outputs = []
-        # state = []
-        # lstm_output = []
-        # for _ in range(config.lstm_layers_num):
-        #     outputs.append([])
-        #     state.append([])
-        #
-        # if is_training:
-        #     logger.info("adding LSTM layer #1")
-        # # unroll the cell to "time_steps" times
-        # with tf.variable_scope("lstm%d" % 1):
-        #     lstm_size = units_num[0]
-        #     cell.append(possible_cell(lstm_size))
-        #     initial_state.append(cell[0].zero_state(batch_size, dtype=tf.float32))
-        #     state[0] = initial_state[0]
-        #     for time_step in range(time_steps):
-        #         if time_step > 0:
-        #             tf.get_variable_scope().reuse_variables()
-        #         (new_h, state[0]) = cell[0](embedding_out[:, time_step, :], state[0])
-        #         outputs[0].append(new_h)
-        #     lstm_output.append(tf.reshape(tf.concat(values=outputs[0], axis=1), [-1, lstm_size]))
-        #
-        # # rest of layers
-        # for i in range(1, config.lstm_layers_num):
-        #     if is_training:
-        #         logger.info("adding LSTM layer #{:d}".format(i+1))
-        #     with tf.variable_scope("lstm%d" % (i + 1)):
-        #         lstm_size = units_num[i]
-        #         cell.append(possible_cell(lstm_size))
-        #         initial_state.append(cell[i].zero_state(batch_size, dtype=tf.float32))
-        #         state[i] = initial_state[i]
-        #         for time_step in range(time_steps):
-        #             if time_step > 0:
-        #                 tf.get_variable_scope().reuse_variables()
-        #             (new_h, state[i]) = cell[i](outputs[i - 1][time_step], state[i])
-        #             outputs[i].append(new_h)
-        #         lstm_output.append(tf.reshape(tf.concat(values=outputs[i], axis=1), [-1, lstm_size]))
-        #
-        # lstm_output = lstm_output[-1]
-
-        if config.shortcut:
-            self.shortcut_proj = w_sc = tf.get_variable(name="W_sc",
-                                                         dtype=tf.float32,initializer=tf.zeros([config.embedding_size,
-                                                                                                config.units_num[config.lstm_layers_num-1]],
-                                                                                               dtype=tf.float32),
-                                                         trainable=False)
-            # b_sc = tf.get_variable(name="b_sc",
-            #                        dtype=tf.float32, initializer=tf.zeros([config.units_num[config.lstm_layers_num - 1]],
-            #                                                               dtype=tf.float32))
-
-
-            sc_state = tf.matmul(tf.reshape(embedding_out, [-1,config.embedding_size]), w_sc)
-            if is_training:
-                self._sc_state_mask = tf.placeholder(dtype=tf.float32,
-                                                     shape=[config.batch_size * config.time_steps,
-                                                            config.units_num[config.lstm_layers_num-1]],
-                                                     name="mos_mask")
-                if config.variational is not None:
-                    with tf.name_scope("mos_mask_gen"):
-                        random_tensor = ops.convert_to_tensor(config.drop_output[-1])
-                        random_tensor += random_ops.random_uniform(
-                            [config.batch_size, 1, config.units_num[config.lstm_layers_num-1]], seed=seed)
-                        random_tensor = tf.tile(random_tensor, [1, config.time_steps, 1])
-                        self._gen_sc_state_mask = tf.reshape(math_ops.floor(random_tensor),
-                                                        [config.batch_size * config.time_steps,
-                                                         config.units_num[config.lstm_layers_num-1]])
-                else:
-                    raise ValueError("variational dropout for short-cut connection is not implemented")
-
-                sc_state = math_ops.div(sc_state, config.drop_output[-1]) * self._sc_state_mask
-
-            lstm_output += sc_state
 
         if config.embedding_size == config.units_num[-1] or config.mos:
             # outer softmax matrix is tied with embedding matrix
@@ -443,14 +328,38 @@ class PTBModel(object):
                                                          output_keep_prob=config.drop_output)
 
 
-        cell = tf.contrib.rnn.MultiRNNCell([possible_cell(config.units_num[i]) for i in range(config.lstm_layers_num)])
-        initial_state = cell.zero_state(batch_size, dtype=tf.float32)
-        # state = self._initial_state
+        outputs = tf.unstack(inputs, num=config.time_steps, axis=1)
+        cell, initial_state, state, output, self.shortcut_proj = list(), list(), list(), list(), list()
+        for i in range(config.lstm_layers_num):
+            with tf.variable_scope("layer_%d" % (i+1)):
+                cell.append(possible_cell(config.units_num[i]))
+                initial_state.append(cell[-1].zero_state(batch_size, dtype=tf.float32))
 
-        inputs = tf.unstack(inputs, num=config.time_steps, axis=1)
-        outputs, state = tf.nn.static_rnn(cell, inputs,
-                                           initial_state=initial_state)
-        output = tf.reshape(tf.concat(outputs, 1), [-1, config.units_num[-1]])
+                outputs, state_ = tf.nn.static_rnn(cell[-1], outputs, initial_state=initial_state[-1])
+                state.append(state_)
+                output = tf.reshape(tf.concat(outputs, 1), [-1, config.units_num[i]])
+
+                if config.shortcut:
+                    with tf.name_scope("prev_state"):
+                        _, initial_h = initial_state[-1]
+                        sc_state = list()
+                        sc_state.append(initial_h)
+                        sc_state.extend(outputs[:-1])
+                        sc_state = tf.stack(sc_state, axis=1)
+                        sc_state = tf.reshape(sc_state, [-1, config.units_num[-1]])
+
+                    with tf.name_scope("shortcut"):
+                        w_sc = tf.get_variable(name="W_sc",
+                                               dtype=tf.float32, initializer=tf.zeros([config.units_num[i],
+                                                                                       config.units_num[i]],
+                                                                                      dtype=tf.float32),
+                                               trainable=False)
+                        self.shortcut_proj.append(w_sc)
+                        sc_state = tf.matmul(tf.reshape(sc_state, [-1, config.units_num[-1]]), w_sc)
+
+                        output += sc_state
+                        outputs = tf.unstack(tf.reshape(output,[-1, config.time_steps, config.units_num[i]]), num=config.time_steps, axis=1)
+
         return output, cell, state, initial_state
         # # organize layers' outputs and states in a list
         # cell = []
@@ -561,9 +470,9 @@ class PTBModel(object):
         if (self._config.drop_output[0] != 1 or self._config.drop_output[1] != 1 or
                 self._config.drop_state[0] != 1 or self._config.drop_state[1] != 1):
             for i in range(config.lstm_layers_num):
-                feed_dict.update(self._cell._cells[i].gen_masks(session))
-        if config.shortcut:
-            feed_dict.update({self._sc_state_mask: session.run(self._gen_sc_state_mask)})
+                feed_dict.update(self._cell[i].gen_masks(session))
+        # if config.shortcut:
+        #     feed_dict.update({self._sc_state_mask: session.run(self._gen_sc_state_mask)})
         if self._config.mos:
             feed_dict.update({self._mos_mask: session.run(self._gen_mos_mask)})
         return feed_dict
@@ -574,7 +483,7 @@ class PTBModel(object):
     def gen_wdrop_mask(self, session):
         masks = {}
         if self._config.drop_state[0] != 1 or self._config.drop_state[1] != 1:
-            for cell in self._cell._cells:
+            for cell in self._cell:
                 masks.update(cell.cell.gen_masks(session))
         return masks
 
@@ -584,12 +493,12 @@ class PTBModel(object):
             for i in range(config.lstm_layers_num):
                 if i < config.lstm_layers_num -1:
                     logger.info("layer %d: out %.2f, state %.2f" % (i+1, output_keep_prob[0], state_keep_prob[0]))
-                    self._cell._cells[i].update_drop_params(session,
+                    self._cell[i].update_drop_params(session,
                                                         output_keep_prob[0],
                                                         state_keep_prob[0])
                 else:
                     logger.info("layer %d: out %.2f, state %.2f" % (i + 1, output_keep_prob[1], state_keep_prob[1]))
-                    self._cell._cells[i].update_drop_params(session,
+                    self._cell[i].update_drop_params(session,
                                                         output_keep_prob[1],
                                                         state_keep_prob[1])
 
@@ -990,26 +899,6 @@ def clip_by_layer(updates):
     return clipped_updates
 
 
-def print_tvars():
-    tvars = tf.trainable_variables()
-    # print(tvars)
-    nvars = config.embedding_size * config.vocab_size
-    for var in tvars[1:]:
-        sh = var.get_shape().as_list()
-        nvars += np.prod(sh)
-        # print ('var: %s, size: [%s]' % (var.name,', '.join(map(str, sh))))
-    logger.info('%2.2fM variables'% (nvars*1e-6))
-
-
-def tvars_num():
-    tvars = tf.trainable_variables()
-    nvars = config.embedding_size * config.vocab_size
-    for var in tvars[1:]:
-        sh = var.get_shape().as_list()
-        nvars += np.prod(sh)
-    return nvars
-
-
 def run_epoch(session, model, eval_op=None, verbose=True):
     """run the given model over its data"""
     start_time = time.time()
@@ -1271,6 +1160,30 @@ def test(session, m, mvalid, mtest):
     return  train_perplexity, valid_perplexity, test_perplexity
 
 
+def print_tvars():
+    logger.info("model variables:")
+    for var in tf.global_variables():
+        logger.info(var)
+
+    tvars = tf.trainable_variables()
+    # print(tvars)
+    nvars = config.embedding_size * config.vocab_size
+    for var in tvars[1:]:
+        sh = var.get_shape().as_list()
+        nvars += np.prod(sh)
+        # print ('var: %s, size: [%s]' % (var.name,', '.join(map(str, sh))))
+    logger.info('%2.2fM variables'% (nvars*1e-6))
+
+
+def tvars_num():
+    tvars = tf.trainable_variables()
+    nvars = config.embedding_size * config.vocab_size
+    for var in tvars[1:]:
+        sh = var.get_shape().as_list()
+        nvars += np.prod(sh)
+    return nvars
+
+
 def read_flags(config, args):
     # assign flags into config
     for arg in sorted(vars(args)):
@@ -1328,7 +1241,7 @@ def get_gpu_devices(str):
     return devices_num
 
 
-def get_vars2restore(layer, units_num):
+def get_vars2restore(layer, model):
     if layer == 0:
         return None
     else:
@@ -1340,15 +1253,19 @@ def get_vars2restore(layer, units_num):
                      print("added")
                      vars2load.append(var)
             if "cell_" in var.op.name:
-                lstm_idx = re.findall("cell_([0-9])+", var.op.name)
+                lstm_idx = re.findall("layer_([0-9])+", var.op.name)
                 if int(lstm_idx[0]) < layer:
                     vars2load.append(var)
                     print("added")
-            if "mos" in var.op.name and units_num[layer] == units_num[layer-1]:
+            if "mos" in var.op.name and model.config.units_num[layer] == model.config.units_num[layer-1]:
                 print("added")
                 vars2load.append(var)
-
+        if config.shortcut:
+            for l in range(layer):
+                print(model.shortcut_proj[l].op.name)
+                vars2load.append(model.shortcut_proj[l])
         return vars2load
+
 
 def write_to_summary(sum_path, config, train, valid, test):
     attr = sorted([attr for attr in dir(config) if not attr.startswith('__')])
@@ -1437,11 +1354,11 @@ def main():
                                  valid_input.epoch_size))
 
                 vars2save = tf.trainable_variables()
-                vars2load = get_vars2restore(layer, units_num)
                 if config.shortcut:
-                    vars2save.append(m.shortcut_proj)
-
+                    vars2save.extend(m.shortcut_proj)
                 saver = tf.train.Saver(var_list=vars2save)
+
+                vars2load = get_vars2restore(layer, m)
                 if vars2load is not None and GL:
                     restore_saver = tf.train.Saver(var_list=vars2load)
                     if config.shortcut:
