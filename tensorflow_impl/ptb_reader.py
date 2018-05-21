@@ -13,7 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 
-
 """Utilities for parsing PTB text files."""
 from __future__ import absolute_import
 from __future__ import division
@@ -23,6 +22,10 @@ import collections
 import os
 
 import tensorflow as tf
+import numpy as np
+import logging
+
+logger = logging.getLogger("logger")
 
 
 def _read_words(filename):
@@ -120,3 +123,37 @@ def ptb_producer(raw_data, batch_size, num_steps, name=None):
                          [batch_size, (i + 1) * num_steps + 1])
     y.set_shape([batch_size, num_steps])
     return x, y
+
+
+class PTBInput(object):
+    """The input data."""
+
+    def __init__(self, config, data):
+        self.raw_data = data
+        self.batch_size = batch_size = config.batch_size
+        self.bptt = bptt = config.bptt
+        self.epoch_size = epoch_size =  (len(data)-1) // (batch_size * bptt)
+        self.data_len = data_len = epoch_size * batch_size * bptt
+        self.data = np.reshape(data[:data_len], newshape=[batch_size, bptt*epoch_size])
+        self.label = np.reshape(data[1:data_len+1], newshape=[batch_size, bptt*epoch_size])
+        self.start_idx = 1
+        self.input_data = tf.placeholder(dtype=tf.int32,shape=[batch_size, bptt], name="input")
+        self.targets = tf.placeholder(dtype=tf.int32, shape=[batch_size, bptt], name="targets")
+
+    def shuffle(self):
+        data = self.raw_data
+        data_len = self.data_len
+        batch_size = self.batch_size
+        epoch_size =  self.epoch_size
+        bptt = self.bptt
+        self.start_idx = start_idx = np.random.randint(0, (len(data)-1) % (self.batch_size * self.bptt))
+        self.data = np.reshape(data[start_idx:start_idx + data_len], newshape=[batch_size, bptt * epoch_size])
+        self.label = np.reshape(data[1+start_idx:data_len + start_idx + 1], newshape=[batch_size, bptt * epoch_size])
+
+        logger.info("Batching from index %d" % self.start_idx)
+
+
+    def get_batch(self, idx):
+        return {self.input_data: self.data[:, idx:idx+self.bptt],
+                self.targets: self.label[:, idx:idx + self.bptt]}
+
